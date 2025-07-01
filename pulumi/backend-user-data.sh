@@ -37,8 +37,8 @@ if [ ! -z "$S3_BUCKET" ]; then
   export S3_BUCKET=$S3_BUCKET
 fi
 
-# Start backend app using pm2
-pm2 start npm --name backend -- run start
+# Start backend app directly with pm2 pointing to server.js
+pm2 start server.js --name backend
 
 pm2 save
 SCRIPT
