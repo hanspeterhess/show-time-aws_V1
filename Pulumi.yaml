@@ -1,0 +1,11 @@
+name: show-time-aws_V1
+description: A minimal TypeScript Pulumi program
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+main: pulumi
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: typescript
