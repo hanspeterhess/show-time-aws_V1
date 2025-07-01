@@ -5,8 +5,8 @@ const streamToString = require('./streamToString'); // helper to read S3 stream
 const app = express();
 app.use(express.json());
 
-const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-west-2' });
-const BUCKET_NAME = process.env.BUCKET_NAME;
+const s3 = new S3Client({ region: "eu-central-1" });
+const BUCKET_NAME = process.env.S3_BUCKET;
 
 app.post('/time', async (req, res) => {
   try {
@@ -46,6 +46,6 @@ app.get('/time', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => console.log(`Backend listening on port ${PORT}`));
 

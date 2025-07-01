@@ -1,46 +1,32 @@
 #!/bin/bash
-sudo apt update -y
-sudo apt install -y curl unzip
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt install -y nodejs
 
-# Create backend directory
-mkdir -p /home/ubuntu/backend
-cd /home/ubuntu/backend
+# Set environment variables from Pulumi
+echo "S3_BUCKET=$S3_BUCKET" >> /etc/environment
 
-# Sample Express server (this will be overwritten via Git pull or SCP later)
-cat <<EOF > server.js
-const express = require('express');
-const AWS = require('aws-sdk');
-const fs = require('fs');
-const app = express();
-const s3 = new AWS.S3();
-const bucket = process.env.S3_BUCKET;
+# Update system
+apt-get update -y
 
-app.get('/save-time', async (req, res) => {
-    const now = new Date().toISOString();
-    const key = 'time.json';
-    const params = {
-        Bucket: bucket,
-        Key: key,
-        Body: JSON.stringify({ time: now }),
-        ContentType: 'application/json'
-    };
-    try {
-        await s3.putObject(params).promise();
-        res.send({ message: 'Time saved', time: now });
-    } catch (err) {
-        console.error(err);
-        res.status(500).send('Error writing to S3');
-    }
-});
+# Install necessary packages
+apt-get install -y curl unzip git
 
-app.listen(3000, () => {
-    console.log('Backend running on port 3000');
-});
-EOF
+# Install Node.js (v18)
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+apt-get install -y nodejs
 
-# Install dependencies and start server
-npm init -y
-npm install express aws-sdk
-node server.js > server.log 2>&1 &
+# Install PM2 to run app persistently
+npm install -g pm2
+
+# Install SSM Agent
+curl "https://s3.eu-central-1.amazonaws.com/amazon-ssm-eu-central-1/latest/debian_amd64/amazon-ssm-agent.deb" -o amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent
+systemctl start amazon-ssm-agent
+
+# Clone your backend repo and start app
+cd /home/ubuntu
+git clone https://github.com/hanspeterhess/show-time-aws_V1.git
+cd show-time-aws_V1/backend
+npm install
+pm2 start npm --name "backend" -- run start
+pm2 save
+

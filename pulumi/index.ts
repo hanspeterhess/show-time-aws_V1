@@ -4,10 +4,9 @@ import * as fs from "fs";
 
 // S3 bucket
 const bucket = new aws.s3.Bucket("timeBucket", {
-    // acl: "public-read", // optional for public read
     website: {
-        indexDocument: "index.html"
-    }
+        indexDocument: "index.html",
+    },
 });
 
 // IAM Role for EC2 to access S3
@@ -54,13 +53,12 @@ const ami = aws.ec2.getAmi({
 // Read EC2 startup script
 const userData = fs.readFileSync("backend-user-data.sh", "utf-8");
 
-// EC2 instance
 const server = new aws.ec2.Instance("backendServer", {
     instanceType: "t3.micro",
     ami: ami.then(a => a.id),
     userData: pulumi.interpolate`#!/bin/bash
-echo "S3_BUCKET=${bucket.bucket}" >> /etc/environment
-${userData}`,
+    echo "S3_BUCKET=${bucket.bucket}" >> /etc/environment
+    ${userData}`,
     vpcSecurityGroupIds: [sg.id],
     iamInstanceProfile: profile.name,
     tags: { Name: "BackendServer" },
