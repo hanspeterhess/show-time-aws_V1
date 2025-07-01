@@ -27,7 +27,6 @@ app.post('/time', async (req, res) => {
     res.status(500).json({ error: 'Failed to save time' });
   }
 });
-
 app.get('/time', async (req, res) => {
   try {
     const key = 'current-time.json';
@@ -41,6 +40,9 @@ app.get('/time', async (req, res) => {
     const json = JSON.parse(bodyContents);
     res.json(json);
   } catch (err) {
+    if (err.Code === 'NoSuchKey' || err.name === 'NoSuchKey') {
+      return res.json({ time: null, message: 'No saved time yet' });
+    }
     console.error('Error getting time:', err);
     res.status(500).json({ error: 'Failed to get time' });
   }
