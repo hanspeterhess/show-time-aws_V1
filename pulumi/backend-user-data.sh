@@ -1,16 +1,14 @@
 #!/bin/bash
 
-# Update system
+# Update system and install dependencies (your existing setup)
 apt-get update -y
-
-# Install necessary packages
 apt-get install -y curl unzip git
 
-# Install Node.js (v18)
+# Install Node.js 18
 curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
 apt-get install -y nodejs
 
-# Install PM2 to run app persistently
+# Install PM2 globally
 npm install -g pm2
 
 # Install SSM Agent
@@ -19,16 +17,35 @@ dpkg -i amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
-# Clone your backend repo and start app as ubuntu user
-sudo -u ubuntu bash <<'EOF'
+
+# Write backend startup script
+cat <<'SCRIPT' > /home/ubuntu/start-backend.sh
+#!/bin/bash
+
 cd /home/ubuntu
-git clone https://github.com/hanspeterhess/show-time-aws_V1.git
+# Clone repo if not already cloned
+if [ ! -d "show-time-aws_V1" ]; then
+  git clone https://github.com/hanspeterhess/show-time-aws_V1.git
+fi
+
 cd show-time-aws_V1/backend
+
 npm install
 
-# Start the app with pm2, passing S3_BUCKET env explicitly
-pm2 start npm --name backend -- run start --env S3_BUCKET=$S3_BUCKET
+# Export S3_BUCKET environment variable if set
+if [ ! -z "$S3_BUCKET" ]; then
+  export S3_BUCKET=$S3_BUCKET
+fi
+
+# Start backend app using pm2
+pm2 start npm --name backend -- run start
 
 pm2 save
-EOF
+SCRIPT
 
+# Change ownership and permissions so ubuntu user can execute
+chown ubuntu:ubuntu /home/ubuntu/start-backend.sh
+chmod +x /home/ubuntu/start-backend.sh
+
+# Run backend startup script as ubuntu user
+sudo -u ubuntu /home/ubuntu/start-backend.sh
