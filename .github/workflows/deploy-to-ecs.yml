@@ -41,3 +41,16 @@ jobs:
         cluster: your-ecs-cluster-name
         task-definition: your-task-def-family
         wait-for-service-stability: true
+
+    - name: Debug environment
+      run: env
+
+    - name: Debug current directory
+      run: pwd && ls -la
+
+    # Example of a step that might fail
+    - name: Build Docker image
+      run: docker build -t my-image .
+      # Add 'continue-on-error: true' to keep logs if needed
+
+    # Add similar debug info for other failing steps
