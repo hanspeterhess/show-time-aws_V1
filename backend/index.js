@@ -6,7 +6,7 @@ const bodyParser = require("body-parser");
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: { origin: "http://localhost:3000" }
+  cors: { origin: "*" }
 });
 const AWS = require("aws-sdk");
 const { v4: uuidv4 } = require("uuid");
@@ -14,13 +14,18 @@ const { v4: uuidv4 } = require("uuid");
 require('dotenv').config();
 
 // Configure AWS SDK region
-AWS.config.update({ region: process.env.AWS_REGION}); // change if your table is in another region
+AWS.config.update({ region: process.env.AWS_REGION});
 const tableName = process.env.TABLE_NAME;
 
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(bodyParser.json());
+
+// Simple health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", message: "Backend is running" });
+});
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
 
