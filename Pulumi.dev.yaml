@@ -3,4 +3,4 @@ config:
   aws:region: eu-central-1
   show-time-aws_V1:dynamoTableName:
     secure: AAABAMie2vXBsdWX56WBomM01PVqIKqnPaoKFMDAgGwJWc2GubA0XSfqJZs1Khg=
-  show-time-aws_V1:imageTag: v1.0.1
+  show-time-aws_V1:imageTag: latest
