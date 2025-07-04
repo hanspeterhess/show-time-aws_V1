@@ -42,9 +42,9 @@ jobs:
     - name: Deploy to ECS
       uses: aws-actions/amazon-ecs-deploy-task-definition@v1
       with:
-        service: your-ecs-service-name
-        cluster: your-ecs-cluster-name
-        task-definition: your-task-def-family
+        service: ecs-service-2f3c311
+        cluster: show-time-cluster
+        task-definition: show-time-task
         wait-for-service-stability: true
 
     - name: Debug environment
