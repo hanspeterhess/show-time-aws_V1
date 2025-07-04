@@ -56,6 +56,29 @@ new aws.iam.RolePolicyAttachment("ecsTaskExecPolicy", {
     policyArn: aws.iam.ManagedPolicy.AmazonECSTaskExecutionRolePolicy,
 });
 
+const dynamoPolicy = table.arn.apply(arn => ({
+  Version: "2012-10-17",
+  Statement: [
+    {
+      Effect: "Allow",
+      Action: [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem"
+      ],
+      Resource: arn,
+    },
+  ],
+}));
+
+new aws.iam.RolePolicy("ecsDynamoDBAccessPolicy", {
+  role: taskExecRole.id,
+  policy: dynamoPolicy.apply(p => JSON.stringify(p)),
+});
+
 // 4. Create a Security Group for the ECS service
 const sg = new aws.ec2.SecurityGroup("ecs-sg", {
     vpcId: vpc.vpc.id,
@@ -85,12 +108,13 @@ const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
     cpu: "256",
     memory: "512",
     requiresCompatibilities: ["EC2"],
-    executionRoleArn: taskExecRole.arn,
-    containerDefinitions: pulumi.all([repo.repositoryUrl]).apply(([imageUrl]) =>
+    executionRoleArn: taskExecRole.arn,   // For ECS service tasks (pull images, logs)
+    taskRoleArn: taskExecRole.arn,        // For your app permissions (like DynamoDB access)
+    containerDefinitions: pulumi.all([repo.repositoryUrl, table.name]).apply(([imageUrl, tableName]) =>
         JSON.stringify([
             {
                 name: "show-time-backend",
-                image: `${imageUrl}:latest`,
+                image: `${imageUrl}:${imageTag}`,
                 essential: true,
                 portMappings: [
                     {
@@ -101,7 +125,7 @@ const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
                 ],
                 environment: [
                     { name: "AWS_REGION", value: region },
-                    { name: "TABLE_NAME", value: table.name },
+                    { name: "TABLE_NAME", value: tableName },
                     { name: "PORT", value: "4000" },
                 ],
             },
