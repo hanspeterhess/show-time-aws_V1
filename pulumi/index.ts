@@ -123,4 +123,4 @@ export const ecrRepoName = repo.name;
 
 export const ecsServiceName = service.name;
 export const ecsClusterName = cluster.name;
-export const ecsTaskFamily = taskDefinition.family;
+export const ecsTaskDefinitionArn = taskDefinition.arn;

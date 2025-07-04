@@ -44,7 +44,7 @@ jobs:
       with:
         service: ecs-service-2f3c311
         cluster: show-time-cluster
-        task-definition: show-time-task
+        task-definition: arn:aws:ecs:eu-central-1:241661649400:task-definition/show-time-task:1
         wait-for-service-stability: true
 
     - name: Debug environment
