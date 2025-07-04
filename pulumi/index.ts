@@ -1,6 +1,7 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
+import * as fs from "fs";
 
 // Config
 const config = new pulumi.Config();
@@ -114,6 +115,12 @@ const service = new aws.ecs.Service("ecs-service", {
     deploymentMinimumHealthyPercent: 0,
     deploymentMaximumPercent: 100,
     networkConfiguration: undefined, // bridge mode
+});
+
+// Export the JSON definition
+taskDefinition.arn.apply(async (arn) => {
+  const def = await aws.ecs.getTaskDefinition({ taskDefinition: arn });
+  fs.writeFileSync("./ecs-task-def.json", JSON.stringify(def.containerDefinitions));
 });
 
 

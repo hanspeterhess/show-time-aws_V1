@@ -40,11 +40,11 @@ jobs:
         docker push ${{ steps.login-ecr.outputs.registry }}/show-time-backend-e5376fb:latest
 
     - name: Deploy to ECS
-      uses: aws-actions/amazon-ecs-deploy@v1
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
       with:
         service: ecs-service-2f3c311
         cluster: show-time-cluster
-        task-definition: arn:aws:ecs:eu-central-1:241661649400:task-definition/show-time-task:1
+        task-definition: ./ecs-task-def.json
         wait-for-service-stability: true
 
     - name: Debug environment
