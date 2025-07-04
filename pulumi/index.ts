@@ -117,12 +117,67 @@ const service = new aws.ecs.Service("ecs-service", {
     networkConfiguration: undefined, // bridge mode
 });
 
-// Export the JSON definition
-taskDefinition.arn.apply(async (arn) => {
-  const def = await aws.ecs.getTaskDefinition({ taskDefinition: arn });
-  fs.writeFileSync("./ecs-task-def.json", JSON.stringify(def.containerDefinitions));
+const ecsInstanceRole = new aws.iam.Role("ecsInstanceRole", {
+    assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ec2.amazonaws.com" }),
 });
 
+new aws.iam.RolePolicyAttachment("ecsInstancePolicy", {
+    role: ecsInstanceRole.name,
+    policyArn: aws.iam.ManagedPolicy.AmazonEC2ContainerServiceforEC2Role,
+});
+
+const instanceProfile = new aws.iam.InstanceProfile("ecsInstanceProfile", {
+    role: ecsInstanceRole.name,
+});
+
+// ECS optimized AMI
+const ami = aws.ec2.getAmi({
+    filters: [
+        { name: "name", values: ["amzn2-ami-ecs-hvm-*-x86_64-ebs"] },
+        { name: "owner-alias", values: ["amazon"] },
+    ],
+    mostRecent: true,
+});
+
+const userData = cluster.name.apply(clusterName =>
+    Buffer.from(`#!/bin/bash
+echo ECS_CLUSTER=${clusterName} >> /etc/ecs/ecs.config
+`).toString("base64")
+);
+
+const launchTemplate = new aws.ec2.LaunchTemplate("ecs-launch-template", {
+    imageId: ami.then(a => a.id),
+    instanceType: "t3.micro",
+    iamInstanceProfile: {
+        name: instanceProfile.name,
+    },
+    vpcSecurityGroupIds: [sg.id],
+    userData,
+    tagSpecifications: [{
+        resourceType: "instance",
+        tags: {
+            Name: "ecs-instance",
+        },
+    }],
+});
+
+const autoScalingGroup = new aws.autoscaling.Group("ecs-asg", {
+    vpcZoneIdentifiers: vpc.publicSubnetIds,
+    minSize: 1,
+    maxSize: 1,
+    desiredCapacity: 1,
+        launchTemplate: {
+        id: launchTemplate.id,
+        version: "$Latest",
+    },
+    tags: [
+        {
+            key: "Name",
+            value: "ecs-instance",
+            propagateAtLaunch: true,
+        },
+    ],
+});
 
 export const tableName = table.name;
 export const ecrRepoUrl = repo.repositoryUrl;
