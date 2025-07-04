@@ -2,14 +2,14 @@ import React, { useEffect, useState } from "react";
 import io from "socket.io-client";
 import axios from "axios";
 
-const socket = io("http://localhost:4000");
+const socket = io("http://3.68.232.218:4000");
 
 function App() {
   const [storedTime, setStoredTime] = useState(null);
 
 const handleClick = async () => {
   try {
-    await axios.post("http://localhost:4000/store-time");
+    await axios.post("http://3.68.232.218:4000/store-time");
   } catch (err) {
     console.error("Error storing time:", err);
     alert("Failed to store time, try again.");
