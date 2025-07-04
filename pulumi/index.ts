@@ -1,11 +1,14 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
-import * as fs from "fs";
+
 
 // Config
 const config = new pulumi.Config();
 const region = aws.config.region || "eu-central-1";
+
+// Get the image tag from config or default to "latest"
+const imageTag = config.get("imageTag") || "latest";
 
 // DynamoDB Table
 const table = new aws.dynamodb.Table("timeStampsTable", {
