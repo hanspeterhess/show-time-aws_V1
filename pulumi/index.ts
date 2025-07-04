@@ -32,4 +32,4 @@ const repo = new aws.ecr.Repository("show-time-backend", {
 
 export const tableName = table.name;
 export const ecrRepoUrl = repo.repositoryUrl;
-export const dockerImageUrl = image.imageName;
+export const ecrRepoName = repo.name;
