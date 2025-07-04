@@ -30,25 +30,6 @@ const repo = new aws.ecr.Repository("show-time-backend", {
     },
 });
 
-// Get ECR credentials and push Docker image
-const image = new docker.Image("backend-image", {
-    build: {
-        context: "../backend", // your Dockerfile must be in this folder
-    },
-    imageName: pulumi.interpolate`${repo.repositoryUrl}:v1`,
-    registry: repo.registryId.apply(async registryId => {
-        const creds = await aws.ecr.getCredentials({ registryId });
-        const decoded = Buffer.from(creds.authorizationToken, 'base64').toString();
-        const [username, password] = decoded.split(":");
-
-        return {
-            server: creds.proxyEndpoint,
-            username,
-            password,
-        };
-    }),
-});
-
 export const tableName = table.name;
 export const ecrRepoUrl = repo.repositoryUrl;
 export const dockerImageUrl = image.imageName;
