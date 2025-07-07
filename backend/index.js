@@ -56,6 +56,28 @@ app.post("/store-time", async (req, res) => {
   res.json({ status: "ok", time });
 });
 
+app.get("/upload-url", (req, res) => {
+  const s3 = new AWS.S3();
+  const fileName = `${uuidv4()}.jpg`; // or .png/.webp
+  const bucketName = process.env.BUCKET_NAME;
+
+  const params = {
+    Bucket: bucketName,
+    Key: fileName,
+    Expires: 60,
+    ContentType: "image/jpeg", // match expected upload type
+  };
+
+  s3.getSignedUrl("putObject", params, (err, url) => {
+    if (err) {
+      console.error("❌ S3 Signed URL error:", err);
+      return res.status(500).json({ error: "Failed to create signed URL" });
+    }
+    res.json({ uploadUrl: url, fileName });
+  });
+});
+
+
 server.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 });
