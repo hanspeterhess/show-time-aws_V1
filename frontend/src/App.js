@@ -15,7 +15,7 @@ function App() {
 
 const handleClick = async () => {
   try {
-    await axios.post("${BACKEND_URL}/store-time");
+    await axios.post(`${BACKEND_URL}/store-time`);
   } catch (err) {
     console.error("Error storing time:", err);
     alert("Failed to store time, try again.");
