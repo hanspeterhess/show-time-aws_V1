@@ -1,6 +1,7 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
+import { NatGateway } from "@pulumi/aws/ec2";
 
 
 // Config
@@ -35,10 +36,17 @@ const repo = new aws.ecr.Repository("show-time-backend", {
 });
 
 // 1. Create a VPC (default)
-// const vpc = new awsx.ec2.Vpc("ecs-vpc", {
-//     subnets: [{ type: "public" }],
-// });
-const vpc = new awsx.ec2.Vpc("ecs-vpc", {});
+// const vpc = new awsx.ec2.Vpc("ecs-vpc", {});
+// Alternatively, only create one public subnet
+const vpc = new awsx.ec2.Vpc("ecs-vpc", {
+    numberOfAvailabilityZones: 1,
+    subnetStrategy: awsx.ec2.SubnetAllocationStrategy.Legacy,
+    subnetSpecs: [{ 
+        type: awsx.ec2.SubnetType.Public, 
+        name: "public-subnet" 
+    }],
+    natGateways: { strategy: awsx.ec2.NatGatewayStrategy.None }, // Disable NAT Gateway for simplicity
+});
 
 // 2. Create an ECS Cluster
 const cluster = new aws.ecs.Cluster("ecs-cluster", {
@@ -133,6 +141,33 @@ const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
     ),
 });
 
+// S3 Bucket
+const bucket = new aws.s3.Bucket("uploadBucket", {
+    forceDestroy: true, // deletes even non-empty buckets
+    corsRules: [{
+        allowedMethods: ["GET", "PUT"],
+        allowedOrigins: ["*"], // restrict in prod
+        allowedHeaders: ["*"],
+    }],
+    tags: { Project: "TimeStoreApp" },
+});
+
+const s3Policy = bucket.arn.apply(arn => ({
+    Version: "2012-10-17",
+    Statement: [
+        {
+            Effect: "Allow",
+            Action: ["s3:PutObject", "s3:GetObject"],
+            Resource: `${arn}/*`,
+        },
+    ],
+}));
+
+new aws.iam.RolePolicy("ecsS3Policy", {
+    role: taskExecRole.name,
+    policy: s3Policy.apply(p => JSON.stringify(p)),
+});
+
 // 7. ECS Service
 const service = new aws.ecs.Service("ecs-service", {
     cluster: cluster.arn,
@@ -209,6 +244,8 @@ const autoScalingGroup = new aws.autoscaling.Group("ecs-asg", {
 export const tableName = table.name;
 export const ecrRepoUrl = repo.repositoryUrl;
 export const ecrRepoName = repo.name;
+
+export const bucketName = bucket.bucket;
 
 export const ecsServiceName = service.name;
 export const ecsClusterName = cluster.name;

@@ -7,6 +7,9 @@ on:
 env:
   AWS_REGION: eu-central-1
   TABLE_NAME: timeStampsTable-0d0843b
+  BUCKET_NAME: uploadbucket-68651bc
+  PORT: 4000
+  
   
 jobs:
   deploy:
@@ -33,9 +36,9 @@ jobs:
       working-directory: ./backend
       run: |
         docker build -t show-time-backend .
-        docker tag show-time-backend:latest ${{ steps.login-ecr.outputs.registry }}/show-time-backend-e5376fb:latest
+        docker tag show-time-backend:latest ${{ steps.login-ecr.outputs.registry }}/show-time-backend-adfb4fc:latest
 
     - name: Push to Amazon ECR
       run: |
-        docker push ${{ steps.login-ecr.outputs.registry }}/show-time-backend-e5376fb:latest
+        docker push ${{ steps.login-ecr.outputs.registry }}/show-time-backend-adfb4fc:latest
 
