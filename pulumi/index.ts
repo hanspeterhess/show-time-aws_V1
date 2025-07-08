@@ -2,6 +2,7 @@ import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import { NatGateway } from "@pulumi/aws/ec2";
+import * as fs from "fs";
 
 
 // Config
@@ -10,6 +11,11 @@ const region = aws.config.region || "eu-central-1";
 
 // Get the image tag from config or default to "latest"
 const imageTag = config.get("imageTag") || "latest";
+
+// Create a Key Pair in AWS
+const keyPair = new aws.ec2.KeyPair("ecs-keypair", {
+    publicKey: fs.readFileSync(`/.ssh/ecs-key.pub`, "utf-8"),
+});
 
 // DynamoDB Table
 const table = new aws.dynamodb.Table("timeStampsTable", {
@@ -90,13 +96,19 @@ new aws.iam.RolePolicy("ecsDynamoDBAccessPolicy", {
 // 4. Create a Security Group for the ECS service
 const sg = new aws.ec2.SecurityGroup("ecs-sg", {
     vpcId: vpc.vpc.id,
-    description: "Allow HTTP",
+    description: "Allow HTTP and SSH access",
     ingress: [
         {
             protocol: "tcp",
             fromPort: 4000,
             toPort: 4000,
             cidrBlocks: ["0.0.0.0/0"],
+        },
+        {
+            protocol: "tcp",
+            fromPort: 22,
+            toPort: 22,
+            cidrBlocks: ["0.0.0.0/0"], // Allow SSH from anywhere (OK for dev)
         },
     ],
     egress: [
@@ -210,6 +222,7 @@ echo ECS_CLUSTER=${clusterName} >> /etc/ecs/ecs.config
 const launchTemplate = new aws.ec2.LaunchTemplate("ecs-launch-template", {
     imageId: ami.then(a => a.id),
     instanceType: "t3.micro",
+    keyName: keyPair.keyName,
     iamInstanceProfile: {
         name: instanceProfile.name,
     },

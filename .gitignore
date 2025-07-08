@@ -1,6 +1,8 @@
 /bin/
 /node_modules/
 
+/.ssh/
+
 *.dev.yaml
 .env
 
