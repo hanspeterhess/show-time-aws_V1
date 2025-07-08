@@ -295,6 +295,27 @@ const autoScalingGroup = new aws.autoscaling.Group("ecs-asg", {
     ],
 });
 
+pulumi
+  .all([table.name, bucket.bucket])
+  .apply(([tableName, bucketName]) => {
+    const envContent = `
+AWS_REGION=${region}
+TABLE_NAME=${tableName}
+PORT=4000
+BUCKET_NAME=${bucketName}
+`.trim();
+
+    // Define the path to the .env file inside your backend folder
+    const envFilePath = path.join(__dirname, "../backend/.env");
+
+    // Write the file synchronously (during Pulumi deployment)
+    fs.writeFileSync(envFilePath, envContent, { encoding: "utf8" });
+
+    console.log(`Wrote .env file to ${envFilePath}`);
+
+    return envContent;
+  });
+
 export const tableName = table.name;
 export const ecrRepoUrl = repo.repositoryUrl;
 export const ecrRepoName = repo.name;

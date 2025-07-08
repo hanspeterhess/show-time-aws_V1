@@ -2,6 +2,7 @@
 /node_modules/
 
 /.ssh/
+.env
 
 *.dev.yaml
 
