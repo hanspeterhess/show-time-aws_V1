@@ -21,7 +21,6 @@ const PORT = process.env.PORT || 4000;
 
 if (!bucketName) {
   console.error("Missing BUCKET_NAME environment variable");
-  return res.status(500).json({ error: "Server configuration error: Missing bucket name" });
 }
 
 app.use(cors());
