@@ -50,6 +50,7 @@ app.get("/upload-url", (req, res) => {
       console.error("❌ S3 Signed URL error:", err);
       return res.status(500).json({ error: "Failed to create signed URL" });
     }
+    console.log("✅ Generated S3 signed URL:", { fileName, url });
     res.json({ uploadUrl: url, fileName });
   });
 });

@@ -5,6 +5,7 @@ import { NatGateway } from "@pulumi/aws/ec2";
 import * as fs from "fs";
 import * as path from "path";
 import { log } from "console";
+import * as docker from "@pulumi/docker";
 
 
 // Config
@@ -48,6 +49,23 @@ const repo = new aws.ecr.Repository("show-time-backend", {
     tags: {
         Project: "TimeStoreApp",
     },
+});
+
+const image = new docker.Image("show-time-backend-image", {
+    imageName: pulumi.interpolate`${repo.repositoryUrl}:${imageTag}`,
+    build: {context: "../backend", },
+    registry: repo.repositoryUrl.apply(repoUrl => {
+        const server = repoUrl.split("/")[0];
+        return aws.ecr.getCredentialsOutput({ registryId: repo.registryId }).apply(creds => {
+            const decodedCreds = Buffer.from(creds.authorizationToken, "base64").toString();
+            const [username, password] = decodedCreds.split(":");
+            return {
+                server,
+                username,
+                password,
+            };
+        });
+    }),
 });
 
 // 1. Create a VPC (default)
@@ -142,14 +160,14 @@ const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
     executionRoleArn: taskExecRole.arn,   // For ECS service tasks (pull images, logs)
     taskRoleArn: taskExecRole.arn,        // For your app permissions (like DynamoDB access)
     containerDefinitions: pulumi.all([
-        repo.repositoryUrl, 
+        image.imageName, 
         table.name,
         logGroup.name,
-    ]).apply(([imageUrl, tableName, logGroupName]) =>
+    ]).apply(([imageName, tableName, logGroupName]) =>
         JSON.stringify([
             {
                 name: "show-time-backend",
-                image: `${imageUrl}:${imageTag}`,
+                image: imageName,
                 essential: true,
                 logConfiguration: {
                     logDriver: "awslogs",
