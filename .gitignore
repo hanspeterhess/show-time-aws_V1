@@ -4,7 +4,6 @@
 /.ssh/
 
 *.dev.yaml
-.env
 
 /.pulumi/
 /.vscode/
