@@ -16,8 +16,13 @@ require('dotenv').config();
 // Configure AWS SDK region
 AWS.config.update({ region: process.env.AWS_REGION});
 const tableName = process.env.TABLE_NAME;
-
+const bucketName = process.env.BUCKET_NAME;
 const PORT = process.env.PORT || 4000;
+
+if (!bucketName) {
+  console.error("Missing BUCKET_NAME environment variable");
+  return res.status(500).json({ error: "Server configuration error: Missing bucket name" });
+}
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -33,7 +38,6 @@ const dynamoDb = new AWS.DynamoDB.DocumentClient();
 app.get("/upload-url", (req, res) => {
   const s3 = new AWS.S3();
   const fileName = `${uuidv4()}.jpg`; // or .png/.webp
-  const bucketName = process.env.BUCKET_NAME;
 
   const params = {
     Bucket: bucketName,
