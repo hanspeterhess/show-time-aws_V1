@@ -3,6 +3,7 @@ import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import { NatGateway } from "@pulumi/aws/ec2";
 import * as fs from "fs";
+import * as path from "path";
 
 
 // Config
@@ -13,8 +14,15 @@ const region = aws.config.region || "eu-central-1";
 const imageTag = config.get("imageTag") || "latest";
 
 // Create a Key Pair in AWS
+const homeDir = process.env.HOME || process.env.USERPROFILE || ""; // Covers Linux, macOS, Windows
+const pubKeyPath = path.join(homeDir, ".ssh", "ecs-key.pub");
+
+if (!fs.existsSync(pubKeyPath)) {
+    throw new Error(`SSH public key not found at ${pubKeyPath}. Please generate one with 'ssh-keygen -t rsa -b 4096 -f ~/.ssh/ecs-key'`);
+}
+
 const keyPair = new aws.ec2.KeyPair("ecs-keypair", {
-    publicKey: fs.readFileSync(`/.ssh/ecs-key.pub`, "utf-8"),
+    publicKey: fs.readFileSync(pubKeyPath, "utf-8"),
 });
 
 // DynamoDB Table
@@ -263,3 +271,5 @@ export const bucketName = bucket.bucket;
 export const ecsServiceName = service.name;
 export const ecsClusterName = cluster.name;
 export const ecsTaskDefinitionArn = taskDefinition.arn;
+
+export const ecspubKeyPath = pubKeyPath;
