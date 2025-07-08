@@ -85,8 +85,8 @@ server.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 });
 
-app._router.stack.forEach(r => {
-  if (r.route && r.route.path) {
-    console.log("Registered route:", r.route.path);
-  }
-});
+// app._router.stack.forEach(r => {
+//   if (r.route && r.route.path) {
+//     console.log("Registered route:", r.route.path);
+//   }
+// });

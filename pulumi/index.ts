@@ -4,6 +4,7 @@ import * as awsx from "@pulumi/awsx";
 import { NatGateway } from "@pulumi/aws/ec2";
 import * as fs from "fs";
 import * as path from "path";
+import { log } from "console";
 
 
 // Config
@@ -129,6 +130,8 @@ const sg = new aws.ec2.SecurityGroup("ecs-sg", {
     ],
 });
 
+const logGroup = new aws.cloudwatch.LogGroup("ecs-log-group");
+
 // 5. Create an ECS Task Definition
 const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
     family: "show-time-task",
@@ -138,12 +141,24 @@ const taskDefinition = new aws.ecs.TaskDefinition("ecs-task", {
     requiresCompatibilities: ["EC2"],
     executionRoleArn: taskExecRole.arn,   // For ECS service tasks (pull images, logs)
     taskRoleArn: taskExecRole.arn,        // For your app permissions (like DynamoDB access)
-    containerDefinitions: pulumi.all([repo.repositoryUrl, table.name]).apply(([imageUrl, tableName]) =>
+    containerDefinitions: pulumi.all([
+        repo.repositoryUrl, 
+        table.name,
+        logGroup.name,
+    ]).apply(([imageUrl, tableName, logGroupName]) =>
         JSON.stringify([
             {
                 name: "show-time-backend",
                 image: `${imageUrl}:${imageTag}`,
                 essential: true,
+                logConfiguration: {
+                    logDriver: "awslogs",
+                    options: {
+                        "awslogs-group": logGroupName,
+                        "awslogs-region": region,
+                        "awslogs-stream-prefix": "ecs",
+                    },
+                },
                 portMappings: [
                     {
                         containerPort: 4000,

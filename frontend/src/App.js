@@ -3,7 +3,7 @@ import io from "socket.io-client";
 import axios from "axios";
 
 // Backend address
-const BACKEND_URL = "http://63.178.13.188:4000";
+const BACKEND_URL = "http://63.179.4.167:4000";
 const socket = io(BACKEND_URL);
 
 function App() {
