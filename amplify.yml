@@ -1,0 +1,21 @@
+version: 1
+frontend:
+  appRoot: frontend
+  phases:
+    preBuild:
+      commands:
+        - yarn install
+    build:
+      commands:
+        - yarn build
+  artifacts:
+    baseDirectory: build
+    files:
+      - '**/*'
+  cache:
+    # Correct cache path for Yarn
+    paths:
+      - node_modules/**/*
+      - ~/.yarn_cache/**/* # Add this line for Yarn's global cache if needed
+  runtime-versions:
+    nodejs: 20
