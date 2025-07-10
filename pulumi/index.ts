@@ -60,7 +60,11 @@ const asRepo = new aws.ecr.Repository("analysis-server-repo", {
 
 const backendImage = new docker.Image("backend-image", {
     imageName: pulumi.interpolate`${backendRepo.repositoryUrl}:${backendImageTag}`,
-    build: { context: "../backend" },
+    build: {
+        context: "../backend",
+        dockerfile: "../backend/Dockerfile.backend",
+        platform: "linux/amd64",
+    },
     registry: backendRepo.repositoryUrl.apply(repoUrl => {
         const server = repoUrl.split("/")[0];
         return aws.ecr.getCredentialsOutput({ registryId: backendRepo.registryId }).apply(creds => {
@@ -77,7 +81,11 @@ const backendImage = new docker.Image("backend-image", {
 
 const asImage = new docker.Image("as-image", {
     imageName: pulumi.interpolate`${asRepo.repositoryUrl}:${asImageTag}`,
-    build: { context: "../analysis-server" },
+    build: {
+        context: "../analysis-server",
+        dockerfile: "../analysis-server/Dockerfile.as", 
+        platform: "linux/amd64",
+    },
     registry: asRepo.repositoryUrl.apply(repoUrl => {
         const server = repoUrl.split("/")[0];
         return aws.ecr.getCredentialsOutput({ registryId: asRepo.registryId }).apply(creds => {
@@ -448,17 +456,17 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
                         "awslogs-stream-prefix": "ecs",
                     },
                 },
-                portMappings: [
-                    {
-                        containerPort: 5000,
-                        hostPort: 5000,
-                        protocol: "tcp",
-                    },
-                ],
+                // portMappings: [
+                //     {
+                //         containerPort: 5000,
+                //         hostPort: 5000,
+                //         protocol: "tcp",
+                //     },
+                // ],
                 environment: [
                     { name: "AWS_REGION", value: region },
-                    { name: "PORT", value: "4000" },
-                    { name: "BACKEND_SERVER_URL", value: pulumi.interpolate`http://${backendloadBalancerDnsName}:4000` },
+                    // { name: "PORT", value: "4000" },
+                    { name: "BACKEND_SERVER_URL", value: `http://${backendloadBalancerDnsName}:4000` },
                 ],
             },
         ])
