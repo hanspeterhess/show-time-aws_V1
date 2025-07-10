@@ -20,4 +20,5 @@ applications:
           - frontend/node_modules/**/*
           - ~/.yarn_cache/**/* # Add this line for Yarn's global cache if needed
       runtime-versions:
-        nodejs: 20      
+        nodejs: 20
+      appRoot: frontend
