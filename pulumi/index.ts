@@ -92,10 +92,9 @@ const asImage = new docker.Image("as-image", {
     }),
 });
 
-// Create a VPC (default)
-// Alternatively, only create one public subnet
+// Create a VPC, and only create one public subnet
 const vpc = new awsx.ec2.Vpc("ecs-vpc", {
-    numberOfAvailabilityZones: 1,
+    numberOfAvailabilityZones: 2,
     subnetStrategy: awsx.ec2.SubnetAllocationStrategy.Legacy,
     subnetSpecs: [{ 
         type: awsx.ec2.SubnetType.Public, 
@@ -368,15 +367,8 @@ const lb = new aws.lb.LoadBalancer("socket-io-lb", {
     internal: false,
     securityGroups: [lbSg.id],
     subnets: vpc.publicSubnetIds,
+    loadBalancerType: "application", // Use Application Load Balancer for HTTP/HTTPS
 });
-
-// // Create an Application Load Balancer
-// const lb = new awsx.lb.ApplicationLoadBalancer("backend-lb", {
-//     // subnets: vpc.publicSubnetIds,
-//     subnetIds: vpc.publicSubnetIds,
-//     securityGroups: [lbSg.id],
-//     internal: false, // Make it public,
-// });
 
 // Create a Target Group for the backend instances
 const backendTargetGroup = new aws.lb.TargetGroup("backend-tg", {
