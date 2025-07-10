@@ -1,0 +1,34 @@
+
+services:
+  backend:
+    build:
+      context: ./backend # Path to the node-backend directory
+      dockerfile: Dockerfile.backend # Specify the Dockerfile name
+    container_name: backend
+    ports:
+      - "4000:4000" # Map host port 4000 to container port 4000
+    env_file:
+      - ./backend/.env.backend # Load environment variables from this file
+    volumes:
+      # Mount local directories for image storage
+      # This allows blurred images to persist on your host machine
+      - ./backend/uploads:/app/uploads
+      - ./backend/blurred:/app/blurred
+    networks:
+      - backend-network
+
+  analysis-server:
+    build:
+      context: ./analysis-server # Path to the analysis-server directory
+      dockerfile: Dockerfile.as # Specify the Dockerfile name
+    container_name: analysis-server
+    env_file:
+      - ./analysis-server/.env.as # Load environment variables from this file
+    depends_on:
+      - backend # Ensure node-backend starts before analysis-server
+    networks:
+      - backend-network
+
+networks:
+  backend-network:
+    driver: bridge

@@ -1,0 +1,25 @@
+# backend/Dockerfile.backend
+# Use an official Node.js runtime as a parent image
+FROM node:18
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy package.json and yarn.lock first to leverage Docker cache
+COPY package.json yarn.lock ./
+
+# Enable Corepack and prepare Yarn 4.6.0
+RUN corepack enable && corepack prepare yarn@4.6.0 --activate
+
+# Install app dependencies
+RUN yarn install
+
+# Copy the rest of the application code
+COPY . .
+
+# Expose the port the app runs on
+EXPOSE 4000
+
+# Command to run the application
+# CMD ["yarn", "start"]
+CMD ["node", "index.js"]
