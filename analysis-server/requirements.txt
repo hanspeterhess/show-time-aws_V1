@@ -2,3 +2,4 @@ python-socketio
 python-dotenv
 Pillow
 requests 
+websocket-client
