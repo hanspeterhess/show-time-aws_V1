@@ -12,6 +12,32 @@ import * as docker from "@pulumi/docker";
 const config = new pulumi.Config();
 const region = aws.config.region || "eu-central-1";
 
+const domainName = config.require("domainName");
+const hostedZoneId = config.require("hostedZoneId");
+
+const certificate = new aws.acm.Certificate("backend-cert", {
+    domainName: domainName,
+    validationMethod: "DNS",
+    tags: {
+        Project: "TimeStoreApp",
+    },
+});
+
+// Using Route 53 for DNS validation
+const certificateValidationDomain = new aws.route53.Record(`${domainName}-validation`, {
+    name: certificate.domainValidationOptions[0].resourceRecordName,
+    zoneId: hostedZoneId,
+    type: certificate.domainValidationOptions[0].resourceRecordType,
+    records: [certificate.domainValidationOptions[0].resourceRecordValue],
+    ttl: 60,
+});
+
+const certificateValidation = new aws.acm.CertificateValidation("backend-cert-validation", {
+    certificateArn: certificate.arn,
+    validationRecordFqdns: [certificateValidationDomain.fqdn],
+    // validationRecords: [certificateValidationDomain.id],
+});
+
 // Get the image tag for backend and analysis server as from config or default to "latest"
 const backendImageTag = config.get("backendImageTag") || "b_latest";
 const asImageTag = config.get("asImageTag") || "as_latest";
@@ -112,13 +138,8 @@ const vpc = new awsx.ec2.Vpc("ecs-vpc", {
 });
 
 // Create an ECS Cluster for backend
-const backendCluster = new aws.ecs.Cluster("backend-cluster", {
-    name: "show-time-backend-cluster",
-});
-
-// Create an ECS Cluster for analysis server (as)
-const asCluster = new aws.ecs.Cluster("as-cluster", {
-    name: "show-time-as-cluster",
+const appCluster = new aws.ecs.Cluster("app-cluster", {
+    name: "app-cluster",
 });
 
 // IAM Role for backend ECS task
@@ -295,13 +316,13 @@ const ami = aws.ec2.getAmi({
     mostRecent: true,
 });
 
-const backendUserData = backendCluster.name.apply(clusterName =>
+const backendUserData = appCluster.name.apply(clusterName =>
     Buffer.from(`#!/bin/bash
 echo ECS_CLUSTER=${clusterName} >> /etc/ecs/ecs.config
 `).toString("base64")
 );
 
-const asUserData = asCluster.name.apply(clusterName =>
+const asUserData = appCluster.name.apply(clusterName =>
     Buffer.from(`#!/bin/bash
 echo ECS_CLUSTER=${clusterName} >> /etc/ecs/ecs.config
 `).toString("base64")
@@ -364,8 +385,21 @@ const backendAutoScalingGroup = new aws.autoscaling.Group("ecs-backend-asg", {
 // Create a Load Balancer Security Group
 const lbSg = new aws.ec2.SecurityGroup("lb-sg", {
     vpcId: vpc.vpc.id,
-    description: "Allow HTTP access to Load Balancer",
-    ingress: [{ protocol: "tcp", fromPort: 4000, toPort: 4000, cidrBlocks: ["0.0.0.0/0"] }],
+    description: "Allow HTTP and HTTPS access to Load Balancer",
+    ingress: [
+        {
+            protocol: "tcp",
+            fromPort: 4000,
+            toPort: 4000,
+            cidrBlocks: ["0.0.0.0/0"],
+        },
+        {
+            protocol: "tcp",
+            fromPort: 443, // Add HTTPS port
+            toPort: 443,
+            cidrBlocks: ["0.0.0.0/0"],
+        },
+    ],
     egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] }],
 });
 
@@ -402,7 +436,21 @@ const backendTargetGroup = new aws.lb.TargetGroup("backend-tg", {
 });
 
 
-// Create a Listener for the Load Balancer
+// Create a Listener for the Load Balancer on HTTPS (port 443)
+const lbListenerHttps = new aws.lb.Listener("backend-listener-https", {
+    loadBalancerArn: lb.arn,
+    port: 443, // Standard HTTPS port
+    protocol: "HTTPS",
+    sslPolicy: "ELBSecurityPolicy-2016-08", // Recommended SSL policy
+    certificateArn: certificateValidation.certificateArn, // Link to the validated certificate
+    defaultActions: [{
+        type: "forward",
+        targetGroupArn: backendTargetGroup.arn,
+    }],
+});
+
+// Create a Listener on http and redirect to https
+// Todo: Delete these two listeners if you don't need HTTP access
 const lbListener = new aws.lb.Listener("backend-listener", {
     loadBalancerArn: lb.arn,
     port: 4000, // Port for incoming client connections to the LB
@@ -412,10 +460,23 @@ const lbListener = new aws.lb.Listener("backend-listener", {
         targetGroupArn: backendTargetGroup.arn,
     }],
 });
+const lbListenerHttpRedirect = new aws.lb.Listener("backend-listener-http-redirect", {
+    loadBalancerArn: lb.arn,
+    port: 4000, // Your current HTTP port
+    protocol: "HTTP",
+    defaultActions: [{
+        type: "redirect",
+        redirect: {
+            port: "443",
+            protocol: "HTTPS",
+            statusCode: "HTTP_301", // Permanent redirect
+        },
+    }],
+});
 
 // ECS Service for backend
 const backendService = new aws.ecs.Service("ecs-backend-service", {
-    cluster: backendCluster.arn,
+    cluster: appCluster.arn,
     desiredCount: 1,
     launchType: "EC2",
     taskDefinition: backendTaskDefinition.arn,
@@ -456,26 +517,26 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
                         "awslogs-stream-prefix": "ecs",
                     },
                 },
-                // portMappings: [
-                //     {
-                //         containerPort: 5000,
-                //         hostPort: 5000,
-                //         protocol: "tcp",
-                //     },
-                // ],
                 environment: [
                     { name: "AWS_REGION", value: region },
-                    // { name: "PORT", value: "4000" },
                     { name: "BACKEND_SERVER_URL", value: `http://${backendloadBalancerDnsName}:4000` },
                 ],
             },
         ])
     ),
+    placementConstraints: [{
+        type: "memberOf",
+        expression: "attribute:ecs.instance-type == t3.micro" // For now, constrain to t3.micro. This will change to GPU instance type later.
+        // TODO: When you move to GPU, you'll change this to:
+        // expression: "attribute:ecs.instance-type =~ g4dn" // or your specific GPU instance type
+        // Or if you use custom attributes on your ASG's launch template instance tags:
+        // expression: "attribute:ecs.instance-attribute.gpu == true"
+    }],
 });
 
 // ECS Service for analysis server (as)
 const asService = new aws.ecs.Service("ecs-as-service", {
-    cluster: asCluster.arn,
+    cluster: appCluster.arn,
     desiredCount: 1,
     launchType: "EC2",
     taskDefinition: asTaskDefinition.arn,
@@ -488,7 +549,7 @@ const asService = new aws.ecs.Service("ecs-as-service", {
 // Auto Scaling Group for analysis server (as)
 const asAutoScalingGroup = new aws.autoscaling.Group("ecs-as-asg", {
     vpcZoneIdentifiers: vpc.publicSubnetIds,
-    minSize: 1,
+    minSize: 1, //will be changed to 0 later for on-demand scaling
     maxSize: 1,
     desiredCapacity: 1,
     launchTemplate: {
@@ -535,7 +596,7 @@ export const bucketName = bucket.bucket;
 export const backendLoadBalancerDnsName = lb.dnsName;
 
 export const ecsServiceName = backendService.name;
-export const ecsClusterName = backendCluster.name;
+export const ecsClusterName = appCluster.name;
 
 export const backendInstancePublicIp = backendRepo.repositoryUrl
 
@@ -543,3 +604,5 @@ export const backendInstancePublicIp = backendRepo.repositoryUrl
 export const ecsTaskDefinitionArn = backendTaskDefinition.arn;
 
 export const ecspubKeyPath = pubKeyPath;
+
+export const backendCustomDomain = domainName;
