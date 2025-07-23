@@ -1,10 +1,8 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
-import { NatGateway } from "@pulumi/aws/ec2";
 import * as fs from "fs";
 import * as path from "path";
-import { log } from "console";
 import * as docker from "@pulumi/docker";
 
 
@@ -12,31 +10,9 @@ import * as docker from "@pulumi/docker";
 const config = new pulumi.Config();
 const region = aws.config.region || "eu-central-1";
 
-const domainName = config.require("domainName");
-const hostedZoneId = config.require("hostedZoneId");
+// This is the subdomain for backend API (e.g., 'api.aikeso.com')
+const backendApiDomainName = config.require("backendApiDomainName");
 
-const certificate = new aws.acm.Certificate("backend-cert", {
-    domainName: domainName,
-    validationMethod: "DNS",
-    tags: {
-        Project: "TimeStoreApp",
-    },
-});
-
-// Using Route 53 for DNS validation
-const certificateValidationDomain = new aws.route53.Record(`${domainName}-validation`, {
-    name: certificate.domainValidationOptions[0].resourceRecordName,
-    zoneId: hostedZoneId,
-    type: certificate.domainValidationOptions[0].resourceRecordType,
-    records: [certificate.domainValidationOptions[0].resourceRecordValue],
-    ttl: 60,
-});
-
-const certificateValidation = new aws.acm.CertificateValidation("backend-cert-validation", {
-    certificateArn: certificate.arn,
-    validationRecordFqdns: [certificateValidationDomain.fqdn],
-    // validationRecords: [certificateValidationDomain.id],
-});
 
 // Get the image tag for backend and analysis server as from config or default to "latest"
 const backendImageTag = config.get("backendImageTag") || "b_latest";
@@ -209,6 +185,44 @@ const s3Policy = bucket.arn.apply(arn => ({
     ],
 }));
 
+const bucketCors = new aws.s3.BucketCorsConfigurationV2("upload-bucket-cors", {
+    bucket: bucket.id,
+    corsRules: [{
+        allowedHeaders: ["*"], // Allow all headers
+        allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"], // Methods allowed from your frontend
+        allowedOrigins: [
+            "https://dev-t.aikeso.com",
+            "http://localhost:3000" // If you test locally
+        ],
+        exposeHeaders: [],
+        maxAgeSeconds: 3000,
+    }],
+});
+
+// IAM Policy for S3 read access
+const s3ReadPolicy = new aws.iam.Policy("s3-read-policy-as", {
+    description: "Allows AS to read objects from the upload S3 bucket",
+    policy: pulumi.all([bucket.arn]).apply(([bucketArn]) => JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+            {
+                Effect: "Allow",
+                Action: [
+                    "s3:GetObject",
+                ],
+                Resource: [
+                    `${bucketArn}/*`, // Allows access to all objects within the bucket
+                ],
+            },
+        ],
+    })),
+});
+
+new aws.iam.PolicyAttachment("as-s3-read-policy-attachment", {
+    roles: [asTaskExecRole], // Attach to your existing AS task role
+    policyArn: s3ReadPolicy.arn,
+});
+
 new aws.iam.RolePolicy("ecsS3Policy", {
     role: backendTaskExecRole.name,
     policy: s3Policy.apply(p => JSON.stringify(p)),
@@ -291,8 +305,6 @@ const backendTaskDefinition = new aws.ecs.TaskDefinition("ecs-backend-task", {
         ])
     ),
 });
-
-
 
 const ecsInstanceRole = new aws.iam.Role("ecsInstanceRole", {
     assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ec2.amazonaws.com" }),
@@ -435,6 +447,12 @@ const backendTargetGroup = new aws.lb.TargetGroup("backend-tg", {
     },
 });
 
+// Request an ACM Certificate using DNS validation for your backend API subdomain
+const certificate = new aws.acm.Certificate("backend-api-cert", {
+    domainName: backendApiDomainName, // e.g. 'api.aikeso.com'
+    validationMethod: "DNS",
+});
+
 
 // Create a Listener for the Load Balancer on HTTPS (port 443)
 const lbListenerHttps = new aws.lb.Listener("backend-listener-https", {
@@ -442,24 +460,13 @@ const lbListenerHttps = new aws.lb.Listener("backend-listener-https", {
     port: 443, // Standard HTTPS port
     protocol: "HTTPS",
     sslPolicy: "ELBSecurityPolicy-2016-08", // Recommended SSL policy
-    certificateArn: certificateValidation.certificateArn, // Link to the validated certificate
+    certificateArn: certificate.arn, // Use the ACM certificate
     defaultActions: [{
         type: "forward",
         targetGroupArn: backendTargetGroup.arn,
     }],
 });
 
-// Create a Listener on http and redirect to https
-// Todo: Delete these two listeners if you don't need HTTP access
-const lbListener = new aws.lb.Listener("backend-listener", {
-    loadBalancerArn: lb.arn,
-    port: 4000, // Port for incoming client connections to the LB
-    protocol: "HTTP",
-    defaultActions: [{
-        type: "forward",
-        targetGroupArn: backendTargetGroup.arn,
-    }],
-});
 const lbListenerHttpRedirect = new aws.lb.Listener("backend-listener-http-redirect", {
     loadBalancerArn: lb.arn,
     port: 4000, // Your current HTTP port
@@ -473,7 +480,6 @@ const lbListenerHttpRedirect = new aws.lb.Listener("backend-listener-http-redire
         },
     }],
 });
-
 // ECS Service for backend
 const backendService = new aws.ecs.Service("ecs-backend-service", {
     cluster: appCluster.arn,
@@ -502,8 +508,8 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
     containerDefinitions: pulumi.all([
         asImage.imageName,
         asLogGroup.name,
-        lb.dnsName,
-    ]).apply(([imageName, logGroupName, backendloadBalancerDnsName]) =>
+        backendApiDomainName,
+    ]).apply(([imageName, logGroupName, apiDomain]) =>
         JSON.stringify([
             {
                 name: "analysis-server",
@@ -519,7 +525,7 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
                 },
                 environment: [
                     { name: "AWS_REGION", value: region },
-                    { name: "BACKEND_SERVER_URL", value: `http://${backendloadBalancerDnsName}:4000` },
+                    { name: "BACKEND_SERVER_URL", value: `https://${apiDomain}` },
                 ],
             },
         ])
@@ -567,13 +573,15 @@ const asAutoScalingGroup = new aws.autoscaling.Group("ecs-as-asg", {
 
 
 pulumi
-  .all([table.name, bucket.bucket])
-  .apply(([tableName, bucketName]) => {
+  .all([table.name, bucket.bucket, lb.dnsName, backendApiDomainName])
+  .apply(([tableName, bucketName, lbDnsName, apiDomainName]) => {
     const envContent = `
 AWS_REGION=${region}
 TABLE_NAME=${tableName}
 PORT=4000
 BUCKET_NAME=${bucketName}
+BACKEND_URL=https://${apiDomainName} # Frontend will use this
+ALB_DNS_NAME=${lbDnsName} #
 `.trim();
 
     // Define the path to the .env file inside your backend folder
@@ -593,8 +601,6 @@ export const ecrRepoName = backendRepo.name;
 
 export const bucketName = bucket.bucket;
 
-export const backendLoadBalancerDnsName = lb.dnsName;
-
 export const ecsServiceName = backendService.name;
 export const ecsClusterName = appCluster.name;
 
@@ -605,4 +611,6 @@ export const ecsTaskDefinitionArn = backendTaskDefinition.arn;
 
 export const ecspubKeyPath = pubKeyPath;
 
-export const backendCustomDomain = domainName;
+export const backendLoadBalancerDnsName = lb.dnsName; // Export ALB DNS name for CNAME
+export const backendApiDomain = backendApiDomainName; // Export the custom domain for reference
+
