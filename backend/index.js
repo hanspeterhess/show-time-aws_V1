@@ -7,8 +7,6 @@ const app = express();
 const server = http.createServer(app);
 const AWS = require("aws-sdk"); 
 const { v4: uuidv4 } = require("uuid");
-const fs = require('fs').promises; // Import Node.js file system module
-const path = require('path'); // Import path module
 
 const io = socketIo(server, {
   cors: { origin: "*" },
@@ -26,6 +24,49 @@ const PORT = process.env.PORT || 4000;
 let pythonSocket = null;
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
+
+// S3 Helper Functions
+const s3BackendService = {
+  // Generates a presigned URL for S3 operations
+  generatePresignedUrl: async (key, action, expiresSeconds = 300) => {
+    const s3 = new AWS.S3();
+    const params = {
+      Bucket: bucketName,
+      Key: key,
+      Expires: expiresSeconds,
+    };
+    try {
+      const url = await s3.getSignedUrlPromise(action, params);
+      console.log(`✅ Generated S3 presigned ${action.toUpperCase()} URL for key: ${key}`);
+      return url;
+    } catch (err) {
+      console.error(`❌ S3 Signed URL error for ${action}:`, err);
+      throw err;
+    }
+  },
+
+  // Checks if an object exists in S3 using headObject
+  checkS3ObjectExists: async (key) => {
+    const s3 = new AWS.S3();
+    const params = {
+      Bucket: bucketName,
+      Key: key,
+    };
+    try {
+      await s3.headObject(params).promise();
+      console.log(`✅ Object ${key} exists in S3.`);
+      return true;
+    } catch (headErr) {
+      if (headErr.code === 'NotFound') {
+        console.warn(`⚠️ Object ${key} not found in S3.`);
+        return false;
+      }
+      console.error(`❌ Error checking S3 object existence for ${key}:`, headErr);
+      throw headErr;
+    }
+  }
+};
+
 
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
@@ -45,15 +86,15 @@ io.on("connection", (socket) => {
 
   socket.on("image-uploaded-to-s3", async ({ originalKey }) => {
     console.log(`Frontend reported upload complete for: ${originalKey}`);
-    const s3 = new AWS.S3();
 
     setTimeout(async () => {
       try {
-        const headParams = {
-          Bucket: bucketName,
-          Key: originalKey,
-        };
-        await s3.headObject(headParams).promise();
+        const exists = await s3BackendService.checkS3ObjectExists(originalKey);
+        if (!exists) {
+          console.error(`File ${originalKey} not found in S3 after delay. Cannot proceed with blurring.`);
+          io.emit("upload-error", { message: `File ${originalKey} not found in S3.` });
+          return;
+        }
 
         console.log(`✅ Object ${originalKey} verified in S3. Triggering blurring.`);
 
@@ -91,46 +132,22 @@ app.use(bodyParser.json());
 // Endpoint to get a pre-signed S3 URL for downloading/displaying an image
 app.get("/get-image-url", async (req, res) => {
 
-  const { key } = req.query; // Image key (e.g., "uuid.jpg" or "uuid_blurred.jpg")
+  const { key } = req.query;
   if (!key) {
       return res.status(400).json({ error: "Image key is required." });
   }
 
-  const s3 = new AWS.S3();
- const headParams  = {
-      Bucket: bucketName,
-      Key: key,
-  };
-  
   try {
-    // Check if the object exists first
-    await s3.headObject(headParams).promise();
-    // If headObject succeeds, the object exists. Proceed to generate presigned URL.
-    console.log(`✅ Object ${key} exists in S3. Generating presigned URL.`);
-  } catch (headErr) {
-    if (headErr.code === 'NotFound') {
-      console.warn(`⚠️ Object ${key} not found in S3.`);
+    const exists = await s3BackendService.checkS3ObjectExists(key);
+    if (!exists) {
       return res.status(404).json({ error: `Object with key '${key}' not found.` });
     }
-    console.error(`❌ Error checking S3 object existence for ${key}:`, headErr);
-    return res.status(500).json({ error: "Failed to verify object existence." });
+    const url = await s3BackendService.generatePresignedUrl(key, "getObject", 300); // 5 minutes expiry
+    res.json({ url });
+  } catch (err) {
+    console.error(`❌ Error in /get-image-url for key ${key}:`, err);
+    res.status(500).json({ error: "Failed to create signed GET URL." });
   }
-
-  // Parameters for getSignedUrl - Expires IS valid here
-  const getObjectSignedUrlParams = {
-      Bucket: bucketName,
-      Key: key,
-      Expires: 300 // URL valid for 300 seconds (5 minutes)
-  };
-
-  s3.getSignedUrl("getObject", getObjectSignedUrlParams, (err, url) => {
-      if (err) {
-          console.error("❌ S3 Signed URL error for getObject:", err);
-          return res.status(500).json({ error: "Failed to create signed URL." });
-      }
-      res.json({ url });
-      console.log(`✅ Generated S3 signed GET URL for key ${key}`);
-  }); 
 });
 
 
@@ -142,43 +159,28 @@ app.get("/health", (req, res) => {
 
 // Endpoint to get a pre-signed S3 URL for image uploads (from frontend)
 app.get("/get-upload-url", async (req, res) => {
-  const s3 = new AWS.S3();
-  const originalFileName = req.query.fileName; // This is primarily for logging/user reference
-  let fileName; // The actual S3 key
+  const originalFileName = req.query.fileName;
+  let fileName; 
   
   // Ensure we consistently use .nii.gz for S3 keys
   if (originalFileName && originalFileName.toLowerCase().endsWith('.nii.gz')) {
-      fileName = `${uuidv4()}.nii.gz`; // Generate new UUID-based name
+      fileName = `${uuidv4()}.nii.gz`; 
   } else {
-      // If the originalFileName is missing or doesn't end with .nii.gz, still enforce the correct extension.
-      // This is a safety for cases where frontend might not send correct extension.
       fileName = `${uuidv4()}.nii.gz`;
       console.warn(`Frontend requested upload for non-.nii.gz file: ${originalFileName}. Forcing .nii.gz key.`);
   }
 
-  const params = {
-    Bucket: bucketName,
-    Key: fileName,
-    Expires: 60, // URL expires in 60 seconds
-    ContentType: "application/octet-stream", 
-  };
-
-
-  s3.getSignedUrl("putObject", params, (err, url) => {
-    if (err) {
-      console.error("❌ S3 Signed URL error:", err);
-      return res.status(500).json({ error: "Failed to create signed URL" });
-    }
-    console.log("✅ Generated S3 signed URL:", { fileName, url });
-    res.json({ uploadUrl: url, fileName });
-
-  });
+  try {
+    const uploadUrl = await s3BackendService.generatePresignedUrl(fileName, "putObject", 60); // 60 seconds expiry
+    res.json({ uploadUrl: uploadUrl, fileName: fileName });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create signed PUT URL." });
+  }
 });
 
 // get a pre-signed S3 URL for blurred image uploads (from AS)
 app.get("/get-blurred-upload-url", async (req, res) => {
-    const s3 = new AWS.S3();
-    const { originalKey } = req.query; // AS sends originalKey so backend can derive blurredKey
+    const { originalKey } = req.query;
 
     if (!originalKey) {
         return res.status(400).json({ error: "originalKey is required." });
@@ -187,21 +189,12 @@ app.get("/get-blurred-upload-url", async (req, res) => {
     // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
     let blurredKey = originalKey.replace(/\.nii\.gz$/, '_blurred.nii.gz');
 
-    const params = {
-        Bucket: bucketName,
-        Key: blurredKey,
-        Expires: 120, // URL valid for 120 seconds (2 minutes) for AS upload
-        ContentType: "application/octet-stream",
-    };
-
-    s3.getSignedUrl("putObject", params, (err, url) => {
-        if (err) {
-            console.error("❌ S3 Signed URL error for blurred upload:", err);
-            return res.status(500).json({ error: "Failed to create signed URL for blurred image." });
-        }
-        console.log("✅ Generated S3 signed PUT URL for AS blurred upload:", { blurredKey, url });
-        res.json({ uploadUrl: url, blurredKey });
-    });
+    try {
+        const uploadUrl = await s3BackendService.generatePresignedUrl(blurredKey, "putObject", 120); // 120 seconds expiry
+        res.json({ uploadUrl: uploadUrl, blurredKey: blurredKey });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to create signed URL for blurred image." });
+    }
 });
 
 // Endpoint to store a timestamp in DynamoDB
