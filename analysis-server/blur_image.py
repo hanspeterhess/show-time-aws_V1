@@ -8,6 +8,11 @@ import time
 import logging
 import requests
 
+import nibabel as nib
+from scipy.ndimage import gaussian_filter
+
+import tempfile 
+
 load_dotenv()
 
 # Set up basic logging to stdout, which awslogs will capture
@@ -40,9 +45,8 @@ def connect_error(data):
 
 @sio.on("blur-image")
 def on_blur_image(data):
-
-    original_key = data["originalKey"] 
-    logger.info(f"🖼️ Received image key for blurring: {original_key}")
+    logger.info("🖼️ Received image for blurring")
+    original_key = data["originalKey"]
 
     try:
         # 1. Request presigned URL from backend
@@ -63,51 +67,63 @@ def on_blur_image(data):
         image_bytes = image_response.content # Raw bytes from the image
         logger.info("✅ Image downloaded from S3.")
 
-        # Process image
-        image = Image.open(io.BytesIO(image_bytes))
-        blurred = image.filter(ImageFilter.GaussianBlur(radius=6))
+        # bb=io.BytesIO(image_bytes)
+        # fh = nib.FileHolder(fileobj=bb)
+        # img = nib.Nifti1Image.from_file_map({'header': fh, 'image': fh})
 
-        # Convert back to bytes for sending back to backend
-        out_buf = io.BytesIO()
-        blurred.save(out_buf, format="JPEG")
-        out_buf.seek(0)
+        blurred_b64 = None
 
-        # Emit back the blurred image (still as base64 to backend for upload)
-        blurred_b64 = base64.b64encode(out_buf.read()).decode("utf-8")
+        logger.info(f"Processing NIfTI file: {original_key}")
+
+        # Use a temporary file to load NIfTI data
+        # `tempfile.NamedTemporaryFile` creates a file that is automatically deleted when closed
+        # `suffix` ensures the temporary file has the correct extension for nibabel
+        with tempfile.NamedTemporaryFile(delete=True, suffix='.nii.gz') as temp_nii_file:
+            temp_nii_file.write(image_bytes) # Write the downloaded bytes to the temporary file
+            temp_nii_file.flush() # Ensure all data is written to disk before reading
+            temp_nii_file_path = temp_nii_file.name
+            logger.info(f"Wrote NIfTI bytes to temporary file: {temp_nii_file_path}")
+
+            try:
+                # Load NIfTI data from the temporary file path
+                img = nib.load(temp_nii_file_path) # <--- Now loading from a file path
+                nifti_data = img.get_fdata()
+
+                # Apply 3D Gaussian blur
+                blurred_nifti_data = gaussian_filter(nifti_data, sigma=3.0)
+
+                # Create a new NIfTI image from the blurred data
+                blurred_img = nib.Nifti1Image(blurred_nifti_data, img.affine, img.header)
+
+                with tempfile.NamedTemporaryFile(delete=True, suffix='.nii.gz') as temp_blurred_nii_file:
+                        temp_blurred_nii_file_path = temp_blurred_nii_file.name
+                        logger.info(f"Saving blurred NIfTI to temporary file: {temp_blurred_nii_file_path}")
+                        nib.save(blurred_img, temp_blurred_nii_file_path)
+                        temp_blurred_nii_file.flush() # Ensure data is written
+
+                        # Read the content of the temporary file into bytes
+                        temp_blurred_nii_file.seek(0) # Rewind to beginning of temp file
+                        blurred_bytes_from_temp_file = temp_blurred_nii_file.read()
+
+                        # Now encode these bytes
+                        blurred_b64 = base64.b64encode(blurred_bytes_from_temp_file).decode("utf-8")
+                        logger.info("✅ Blurred 3D NIfTI data prepared from temporary file")
+
+            except Exception as load_err:
+                logger.error(f"❌ Error loading NIfTI from temporary file {temp_nii_file_path}: {load_err}", exc_info=True)
+                # If loading fails, we should not proceed with emitting blurred data
+                return
+
         sio.emit("blurred-image", {
-            "originalKey": original_key,
+            "originalKey": original_key, # Keep originalKey to distinguish in frontend/backend
             "buffer": blurred_b64
         })
-        logger.info("✅ Blurred image sent back to backend")
+        logger.info(f"📤 Sent blurred data for {original_key} back to backend.")
+
     except requests.exceptions.RequestException as req_err:
         logger.error(f"❌ HTTP/Network error while getting presigned URL or downloading image: {req_err}", exc_info=True)
     except Exception as e:
         logger.error(f"❌ Error processing image from S3: {e}", exc_info=True)
-
-
-    # try:
-    #     original_key = data["originalKey"]
-    #     image_bytes = base64.b64decode(data["buffer"])
-
-    #     # Process image
-    #     image = Image.open(io.BytesIO(image_bytes))
-    #     blurred = image.filter(ImageFilter.GaussianBlur(radius=6))
-
-    #     # Convert back to bytes
-    #     out_buf = io.BytesIO()
-    #     blurred.save(out_buf, format="JPEG")
-    #     out_buf.seek(0)
-        
-    #     # Emit back the blurred image
-    #     blurred_b64 = base64.b64encode(out_buf.read()).decode("utf-8")
-    #     sio.emit("blurred-image", {
-    #         "originalKey": original_key,
-    #         "buffer": blurred_b64
-    #     })
-    #     logger.info("✅ Blurred image sent back")
-    # except Exception as e:
-    #     logger.error(f"❌ Error processing image: {e}", exc_info=True) # exc_info=True prints traceback
-
 
 
 def main():
