@@ -1,17 +1,15 @@
 import os
 import socketio
-from PIL import Image, ImageFilter
 import io
 import base64
 from dotenv import load_dotenv
 import time
 import logging
 import requests
+import tempfile 
 
 import nibabel as nib
 from scipy.ndimage import gaussian_filter
-
-import tempfile 
 
 load_dotenv()
 
@@ -29,6 +27,49 @@ if not BACKEND_SERVER_URL:
     exit(1)
 
 sio = socketio.Client()
+
+# S3 Interaction Service for Analysis Server
+class S3ASService:
+    def __init__(self, backend_url):
+        self.backend_url = backend_url
+
+    def _request_presigned_url(self, endpoint, key_param_name, key_value):
+        """Helper to request a presigned URL from the backend."""
+        url_endpoint = f"{self.backend_url}/{endpoint}?{key_param_name}={key_value}"
+        logger.info(f"Requesting presigned URL from: {url_endpoint}")
+        response = requests.get(url_endpoint)
+        response.raise_for_status()
+        return response.json()
+
+    def download_from_s3(self, original_key):
+        """Downloads a file from S3 using a presigned GET URL."""
+        presigned_data = self._request_presigned_url("get-image-url", "key", original_key)
+        image_download_url = presigned_data["url"]
+        logger.info("✅ Received presigned GET URL. Downloading image...")
+
+        image_response = requests.get(image_download_url)
+        image_response.raise_for_status()
+        logger.info("✅ Image downloaded from S3.")
+        return image_response.content
+
+    def upload_to_s3(self, original_key, blurred_nifti_bytes):
+        """Uploads blurred NIfTI data to S3 using a presigned PUT URL."""
+        presigned_upload_data = self._request_presigned_url("get-blurred-upload-url", "originalKey", original_key)
+        blurred_s3_upload_url = presigned_upload_data["uploadUrl"]
+        blurred_key_for_s3 = presigned_upload_data["blurredKey"]
+
+        logger.info(f"✅ Received presigned PUT URL for blurred image: {blurred_key_for_s3}")
+        logger.info(f"Uploading blurred NIfTI (approx {len(blurred_nifti_bytes)/1024/1024:.2f} MB) directly to S3...")
+
+        s3_upload_response = requests.put(blurred_s3_upload_url, data=blurred_nifti_bytes, headers={
+            'Content-Type': 'application/octet-stream'
+        })
+        s3_upload_response.raise_for_status()
+        logger.info(f"✅ Blurred NIfTI image successfully uploaded to S3: {blurred_key_for_s3}")
+        return blurred_key_for_s3 # Return the key used for S3
+
+
+s3_as_service = S3ASService(BACKEND_SERVER_URL)
 
 @sio.event
 def connect():
@@ -49,46 +90,22 @@ def on_blur_image(data):
     original_key = data["originalKey"]
 
     try:
-        # 1. Request presigned URL from backend
-        get_url_endpoint = f"{BACKEND_SERVER_URL}/get-image-url?key={original_key}"
-        logger.info(f"Requesting presigned URL from: {get_url_endpoint}")
-
-        response = requests.get(get_url_endpoint)
-        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-
-        presigned_data = response.json()
-        image_download_url = presigned_data["url"]
-        logger.info("✅ Received presigned URL. Downloading image...")
-
-        # 2. Download image directly from S3 using the presigned URL
-        image_response = requests.get(image_download_url)
-        image_response.raise_for_status()
-
-        image_bytes = image_response.content # Raw bytes from the image
-        logger.info("✅ Image downloaded from S3.")
-
-        blurred_b64 = None
+        # Download original NIfTI image from S3
+        original_nifti_bytes = s3_as_service.download_from_s3(original_key)
 
         logger.info(f"Processing NIfTI file: {original_key}")
 
-        # Use a temporary file to load NIfTI data
-        # `tempfile.NamedTemporaryFile` creates a file that is automatically deleted when closed
-        # `suffix` ensures the temporary file has the correct extension for nibabel
         with tempfile.NamedTemporaryFile(delete=True, suffix='.nii.gz') as temp_nii_file:
-            temp_nii_file.write(image_bytes) # Write the downloaded bytes to the temporary file
-            temp_nii_file.flush() # Ensure all data is written to disk before reading
+            temp_nii_file.write(original_nifti_bytes) 
+            temp_nii_file.flush()
             temp_nii_file_path = temp_nii_file.name
             logger.info(f"Wrote NIfTI bytes to temporary file: {temp_nii_file_path}")
 
             try:
-                # Load NIfTI data from the temporary file path
-                img = nib.load(temp_nii_file_path) # <--- Now loading from a file path
+                img = nib.load(temp_nii_file_path)
                 nifti_data = img.get_fdata()
 
-                # Apply 3D Gaussian blur
                 blurred_nifti_data = gaussian_filter(nifti_data, sigma=3.0)
-
-                # Create a new NIfTI image from the blurred data
                 blurred_img = nib.Nifti1Image(blurred_nifti_data, img.affine, img.header)
 
                 with tempfile.NamedTemporaryFile(delete=True, suffix='.nii.gz') as temp_blurred_nii_file:
@@ -105,25 +122,9 @@ def on_blur_image(data):
                 # If loading fails, we should not proceed with emitting blurred data
                 return
             
-        # Request presigned PUT URL from backend for the blurred image
-        get_blurred_upload_url_endpoint = f"{BACKEND_SERVER_URL}/get-blurred-upload-url?originalKey={original_key}"
-        logger.info(f"Requesting presigned PUT URL for blurred image from: {get_blurred_upload_url_endpoint}")
-
-        upload_url_response = requests.get(get_blurred_upload_url_endpoint)
-        upload_url_response.raise_for_status()
         
-        presigned_upload_data = upload_url_response.json()
-        blurred_s3_upload_url = presigned_upload_data["uploadUrl"]
-        blurred_key_for_s3 = presigned_upload_data["blurredKey"] # Get the actual key backend generated
-        logger.info(f"✅ Received presigned PUT URL for blurred image: {blurred_key_for_s3}")
-
         # Upload blurred NIfTI data directly to S3
-        logger.info(f"Uploading blurred NIfTI (approx {len(blurred_nifti_bytes)/1024/1024:.2f} MB) directly to S3...")
-        s3_upload_response = requests.put(blurred_s3_upload_url, data=blurred_nifti_bytes, headers={
-            'Content-Type': 'application/octet-stream' # Ensure correct content type for .nii.gz
-        })
-        s3_upload_response.raise_for_status()
-        logger.info(f"✅ Blurred NIfTI image successfully uploaded to S3: {blurred_key_for_s3}")
+        blurred_key_for_s3 = s3_as_service.upload_to_s3(original_key, blurred_nifti_bytes)
 
         # Emit only notification to backend (no buffer)
         sio.emit("blurred-image-uploaded", {
@@ -131,13 +132,6 @@ def on_blur_image(data):
             "blurredKey": blurred_key_for_s3
         })
         logger.info(f"📤 Sent notification that blurred image {blurred_key_for_s3} is uploaded back to backend.")
-
-
-        # sio.emit("blurred-image", {
-        #     "originalKey": original_key, # Keep originalKey to distinguish in frontend/backend
-        #     "buffer": blurred_b64
-        # })
-        # logger.info(f"📤 Sent blurred data for {original_key} back to backend.")
 
     except requests.exceptions.RequestException as req_err:
         logger.error(f"❌ HTTP/Network error while getting presigned URL or downloading image: {req_err}", exc_info=True)
@@ -150,10 +144,8 @@ def main():
         try:
             logger.info(f"🔌 Attempting connection to {BACKEND_SERVER_URL}...")
             sio.connect(BACKEND_SERVER_URL)
-            # This logger.info call should definitely show up
             logger.info("--- AS Main Loop: sio.connect() call returned successfully. Entering wait state. ---")
             sio.wait() # This blocks the main thread until disconnect or error
-            logger.info("--- AS Main Loop: sio.wait() finished. ---")
         except Exception as e:
             logger.error(f"⚠️ Connection error in main loop: {e}", exc_info=True)
             logger.info("🔁 Retrying connection in 5 seconds...")
