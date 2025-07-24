@@ -166,11 +166,6 @@ new aws.iam.RolePolicy("ecsDynamoDBAccessPolicy", {
 // S3 Bucket
 const bucket = new aws.s3.Bucket("uploadBucket", {
     forceDestroy: true, // deletes even non-empty buckets
-    corsRules: [{
-        allowedMethods: ["GET", "PUT"],
-        allowedOrigins: ["*"], // restrict in prod
-        allowedHeaders: ["*"],
-    }],
     tags: { Project: "TimeStoreApp" },
 });
 
@@ -192,6 +187,7 @@ const bucketCors = new aws.s3.BucketCorsConfigurationV2("upload-bucket-cors", {
         allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"], // Methods allowed from your frontend
         allowedOrigins: [
             "https://dev-t.aikeso.com",
+            "https://www.dev-t.aikeso.com",
             "http://localhost:3000" // If you test locally
         ],
         exposeHeaders: [],
