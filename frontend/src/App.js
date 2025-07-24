@@ -9,6 +9,42 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:4000"
 // Initialize socket connection
 const socket = io(BACKEND_URL);
 
+// S3 Service for Frontend Interactions
+const s3FrontendService = {
+  // Fetches a presigned GET URL from the backend
+  fetchDownloadUrl: async (key) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/get-image-url?key=${key}`);
+      return response.data.url;
+    } catch (error) {
+      console.error(`Error fetching download URL for ${key}:`, error);
+      throw error; // Re-throw to be handled by caller
+    }
+  },
+
+  // Uploads a file to S3 using a presigned PUT URL obtained from the backend
+  uploadFileToS3: async (file, backendUploadUrlEndpoint) => {
+    // 1. Get presigned PUT URL from backend
+    const fileName = `${uuidv4()}.nii.gz`; // Enforce .nii.gz extension
+    console.log(`Frontend: Requesting upload URL for fileName: ${fileName}`);
+
+    const uploadUrlResponse = await axios.get(`${backendUploadUrlEndpoint}?fileName=${fileName}`);
+    const { uploadUrl, fileName: receivedFileName } = uploadUrlResponse.data;
+    
+    console.log("Frontend: Received fileName from backend for upload:", receivedFileName);
+
+    // 2. Upload file directly to S3 using the presigned URL
+    await axios.put(uploadUrl, file, {
+      headers: {
+        "Content-Type": "application/octet-stream", // Content-Type for .nii.gz
+      },
+    });
+
+    console.log(`Frontend: File successfully PUT to S3: ${receivedFileName}`);
+    return { uploadedFileName: receivedFileName }; // Return the actual filename used for S3
+  }
+};
+
 function App() {
   const [storedTime, setStoredTime] = useState(null);
   const [imageFile, setImageFile] = useState(null);
@@ -16,7 +52,7 @@ function App() {
   const [blurredFileName, setBlurredFileName] = useState("");
   const [blurredDownloadUrl, setBlurredDownloadUrl] = useState("");
 
-
+  // Function to initiate download
   const handleDownloadBlurred = async () => {
     if (!blurredDownloadUrl || !blurredFileName) {
       alert("Blurred image not ready for download.");
@@ -26,7 +62,6 @@ function App() {
       // Create a temporary anchor element to trigger download
       const link = document.createElement('a');
       link.href = blurredDownloadUrl;
-      // Use blurredFileName for the suggested download name
       link.download = `blurred_${blurredFileName}`;
       document.body.appendChild(link);
       link.click();
@@ -62,36 +97,16 @@ function App() {
     }
 
     try {
-      // 1. Generate a unique filename on the frontend (as you had before)
-      const fileName = `${uuidv4()}.nii.gz`;
-      console.log(`Frontend: Requesting upload URL for fileName: ${fileName}`);
 
-      // 2. Get the presigned PUT URL from the backend's /upload-url endpoint
-      // This endpoint will return the actual S3 key (fileName) it generated.
-      const uploadUrlResponse = await axios.get(`${BACKEND_URL}/get-upload-url?fileName=${fileName}`);
-      const { uploadUrl, fileName: receivedFileName } = uploadUrlResponse.data; // Use receivedFileName from backend
+      const { uploadedFileName } = await s3FrontendService.uploadFileToS3(imageFile, `${BACKEND_URL}/get-upload-url`);
       
-      // For displaying the original image URL in the UI
-      setOriginalFileName(uploadUrl.split("?")[0]);
+      setOriginalFileName(uploadedFileName);
 
-      // Log the fileName received from backend for debugging
-      console.log("Frontend: Received fileName from backend for upload:", receivedFileName);
-
-      // 3. Upload image directly to S3 using the presigned URL
-      await axios.put(uploadUrl, imageFile, {
-        headers: {
-          "Content-Type": imageFile.type,
-        },
-      });
-
-      // 4. After successful S3 upload, inform backend via socket with the CORRECT receivedFileName
       socket.emit("image-uploaded-to-s3", { originalKey: receivedFileName });
 
-      console.log(`App.js: Image successfully PUT to S3. Emitting 'image-uploaded-to-s3' for originalKey: ${receivedFileName}`);
       alert("File uploaded successfully! Processing will begin shortly.");
     } catch (err) {
       console.error("Error uploading file:", err);
-      // Check for specific backend errors (like unsupported file type)
       if (err.response && err.response.data && err.response.data.error) {
           alert(`Failed to upload file: ${err.response.data.error}`);
       } else {
@@ -100,9 +115,6 @@ function App() {
     }
   };
 
-
-
-  //Socket.IO connection logging
   useEffect(() => {
     socket.on('connect', () => {
       console.log('✅ Frontend Socket.IO connected!');
@@ -122,15 +134,14 @@ function App() {
     });
 
     socket.on("image-blurred", async ({ blurredKey, originalKey }) => {
-      console.log('🖼️ Received blurred image notification:', blurredKey);
+      console.log('✨ Frontend: Image blurred event received!', blurredKey);
       
       // Construct the public S3 URL for the blurred image
       setBlurredFileName(blurredKey);
 
       // Request presigned download URL for the blurred image
       try {
-        const response = await axios.get(`${BACKEND_URL}/get-image-url?key=${blurredKey}`);
-        const { url } = response.data;
+        const url = await s3FrontendService.fetchDownloadUrl(blurredKey);
         setBlurredDownloadUrl(url);
         console.log("✅ Frontend: Received blurred image download URL.");
       } catch (error) {
@@ -140,6 +151,11 @@ function App() {
       alert("Blurred image is ready for download!");
     });
 
+    socket.on("upload-error", (data) => {
+        alert(`Upload Error: ${data.message}`);
+        console.error("Backend upload error:", data.message);
+    });
+
     return () => {
       socket.off('connect');
       socket.off('disconnect');
@@ -147,6 +163,7 @@ function App() {
       socket.off("time-ready");
       socket.off("image-blurred");
       socket.off("image-uploaded-to-s3");
+      socket.off("upload-error");
     };
   }, []);
  
@@ -232,7 +249,7 @@ function App() {
               onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#0056b3'}
               onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#007bff'}
             >
-              Download Blurred .nii.gz
+              Download Blurred NIFTI 
             </button>
           </div>
         )}
