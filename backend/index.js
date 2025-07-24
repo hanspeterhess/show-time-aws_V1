@@ -30,7 +30,7 @@ const dynamoDb = new AWS.DynamoDB.DocumentClient();
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
 
-  // Optionally: tag this as the Python client if it identifies itself
+  // tag this as the Python client if it identifies itself
   socket.on("identify", (data) => {
     if (data.role === "python-client") {
       pythonSocket = socket;
@@ -38,30 +38,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("blurred-image", async (data) => {
-    const { originalKey, buffer } = data;
-    const s3 = new AWS.S3();
-
-    try {
-      const imageBuffer = Buffer.from(buffer, "base64");
-
-      // Determine the blurred key based on the originalKey's extension
-      let blurredKey;
-      blurredKey = originalKey.replace(/\.nii\.gz$/, '_blurred.nii.gz');
-
-      await s3.putObject({
-        Bucket: bucketName,
-        Key: blurredKey,
-        Body: Buffer.from(buffer, 'base64'),
-        ContentType: 'application/octet-stream',
-      })
-      .promise();
-
-    console.log("✅ Blurred image uploaded to S3:", blurredKey);
-    io.emit("image-blurred", { blurredKey, originalKey  });
-    } catch (err) {
-      console.error("❌ Failed to upload blurred image:", err);
-    }
+  socket.on("blurred-image-uploaded", ({ originalKey, blurredKey }) => { // Renamed event and data structure
+    console.log("✅ Blurred image uploaded by AS to S3:", blurredKey);
+    io.emit("image-blurred", { blurredKey, originalKey }); // Notify frontend
   });
 
   socket.on("image-uploaded-to-s3", async ({ originalKey }) => {
@@ -118,12 +97,13 @@ app.get("/get-image-url", async (req, res) => {
   }
 
   const s3 = new AWS.S3();
-  const headParams = {
-    Bucket: bucketName,
-    Key: key,
+ const headParams  = {
+      Bucket: bucketName,
+      Key: key,
   };
   
   try {
+    // Check if the object exists first
     await s3.headObject(headParams).promise();
     // If headObject succeeds, the object exists. Proceed to generate presigned URL.
     console.log(`✅ Object ${key} exists in S3. Generating presigned URL.`);
@@ -136,13 +116,14 @@ app.get("/get-image-url", async (req, res) => {
     return res.status(500).json({ error: "Failed to verify object existence." });
   }
 
-  const params = {
+  // Parameters for getSignedUrl - Expires IS valid here
+  const getObjectSignedUrlParams = {
       Bucket: bucketName,
       Key: key,
       Expires: 300 // URL valid for 300 seconds (5 minutes)
   };
 
-  s3.getSignedUrl("getObject", params, (err, url) => {
+  s3.getSignedUrl("getObject", getObjectSignedUrlParams, (err, url) => {
       if (err) {
           console.error("❌ S3 Signed URL error for getObject:", err);
           return res.status(500).json({ error: "Failed to create signed URL." });
@@ -159,14 +140,20 @@ app.get("/health", (req, res) => {
 });
 
 
-// Endpoint to get a pre-signed S3 URL for image uploads
+// Endpoint to get a pre-signed S3 URL for image uploads (from frontend)
 app.get("/get-upload-url", async (req, res) => {
   const s3 = new AWS.S3();
-  const originalFileName = req.query.fileName;
-  const fileName = `${uuidv4()}.nii.gz`;
-
-  if (!originalFileName) {
-    return res.status(400).json({ error: "fileName is required" });
+  const originalFileName = req.query.fileName; // This is primarily for logging/user reference
+  let fileName; // The actual S3 key
+  
+  // Ensure we consistently use .nii.gz for S3 keys
+  if (originalFileName && originalFileName.toLowerCase().endsWith('.nii.gz')) {
+      fileName = `${uuidv4()}.nii.gz`; // Generate new UUID-based name
+  } else {
+      // If the originalFileName is missing or doesn't end with .nii.gz, still enforce the correct extension.
+      // This is a safety for cases where frontend might not send correct extension.
+      fileName = `${uuidv4()}.nii.gz`;
+      console.warn(`Frontend requested upload for non-.nii.gz file: ${originalFileName}. Forcing .nii.gz key.`);
   }
 
   const params = {
@@ -188,6 +175,34 @@ app.get("/get-upload-url", async (req, res) => {
   });
 });
 
+// get a pre-signed S3 URL for blurred image uploads (from AS)
+app.get("/get-blurred-upload-url", async (req, res) => {
+    const s3 = new AWS.S3();
+    const { originalKey } = req.query; // AS sends originalKey so backend can derive blurredKey
+
+    if (!originalKey) {
+        return res.status(400).json({ error: "originalKey is required." });
+    }
+
+    // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
+    let blurredKey = originalKey.replace(/\.nii\.gz$/, '_blurred.nii.gz');
+
+    const params = {
+        Bucket: bucketName,
+        Key: blurredKey,
+        Expires: 120, // URL valid for 120 seconds (2 minutes) for AS upload
+        ContentType: "application/octet-stream",
+    };
+
+    s3.getSignedUrl("putObject", params, (err, url) => {
+        if (err) {
+            console.error("❌ S3 Signed URL error for blurred upload:", err);
+            return res.status(500).json({ error: "Failed to create signed URL for blurred image." });
+        }
+        console.log("✅ Generated S3 signed PUT URL for AS blurred upload:", { blurredKey, url });
+        res.json({ uploadUrl: url, blurredKey });
+    });
+});
 
 // Endpoint to store a timestamp in DynamoDB
 app.post("/store-time", async (req, res) => {

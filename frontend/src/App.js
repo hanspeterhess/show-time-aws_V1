@@ -14,7 +14,7 @@ function App() {
   const [imageFile, setImageFile] = useState(null);
   const [originalFileName, setOriginalFileName] = useState("");
   const [blurredFileName, setBlurredFileName] = useState("");
-  const [blurredDownloadUrl, setBlurredDownloadUrl] = useState(""); // NEW: State for blurred download URL
+  const [blurredDownloadUrl, setBlurredDownloadUrl] = useState("");
 
 
   const handleDownloadBlurred = async () => {
@@ -127,11 +127,11 @@ function App() {
       // Construct the public S3 URL for the blurred image
       setBlurredFileName(blurredKey);
 
-      // NEW: Request presigned download URL for the blurred image
+      // Request presigned download URL for the blurred image
       try {
         const response = await axios.get(`${BACKEND_URL}/get-image-url?key=${blurredKey}`);
         const { url } = response.data;
-        setBlurredDownloadUrl(url); // Store the presigned URL
+        setBlurredDownloadUrl(url);
         console.log("✅ Frontend: Received blurred image download URL.");
       } catch (error) {
         console.error("❌ Frontend: Error getting blurred image download URL:", error);

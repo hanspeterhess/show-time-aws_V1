@@ -67,10 +67,6 @@ def on_blur_image(data):
         image_bytes = image_response.content # Raw bytes from the image
         logger.info("✅ Image downloaded from S3.")
 
-        # bb=io.BytesIO(image_bytes)
-        # fh = nib.FileHolder(fileobj=bb)
-        # img = nib.Nifti1Image.from_file_map({'header': fh, 'image': fh})
-
         blurred_b64 = None
 
         logger.info(f"Processing NIfTI file: {original_key}")
@@ -99,26 +95,49 @@ def on_blur_image(data):
                         temp_blurred_nii_file_path = temp_blurred_nii_file.name
                         logger.info(f"Saving blurred NIfTI to temporary file: {temp_blurred_nii_file_path}")
                         nib.save(blurred_img, temp_blurred_nii_file_path)
-                        temp_blurred_nii_file.flush() # Ensure data is written
-
-                        # Read the content of the temporary file into bytes
-                        temp_blurred_nii_file.seek(0) # Rewind to beginning of temp file
-                        blurred_bytes_from_temp_file = temp_blurred_nii_file.read()
-
-                        # Now encode these bytes
-                        blurred_b64 = base64.b64encode(blurred_bytes_from_temp_file).decode("utf-8")
+                        temp_blurred_nii_file.flush()
+                        temp_blurred_nii_file.seek(0)
+                        blurred_nifti_bytes = temp_blurred_nii_file.read()
                         logger.info("✅ Blurred 3D NIfTI data prepared from temporary file")
 
             except Exception as load_err:
                 logger.error(f"❌ Error loading NIfTI from temporary file {temp_nii_file_path}: {load_err}", exc_info=True)
                 # If loading fails, we should not proceed with emitting blurred data
                 return
+            
+        # Request presigned PUT URL from backend for the blurred image
+        get_blurred_upload_url_endpoint = f"{BACKEND_SERVER_URL}/get-blurred-upload-url?originalKey={original_key}"
+        logger.info(f"Requesting presigned PUT URL for blurred image from: {get_blurred_upload_url_endpoint}")
 
-        sio.emit("blurred-image", {
-            "originalKey": original_key, # Keep originalKey to distinguish in frontend/backend
-            "buffer": blurred_b64
+        upload_url_response = requests.get(get_blurred_upload_url_endpoint)
+        upload_url_response.raise_for_status()
+        
+        presigned_upload_data = upload_url_response.json()
+        blurred_s3_upload_url = presigned_upload_data["uploadUrl"]
+        blurred_key_for_s3 = presigned_upload_data["blurredKey"] # Get the actual key backend generated
+        logger.info(f"✅ Received presigned PUT URL for blurred image: {blurred_key_for_s3}")
+
+        # Upload blurred NIfTI data directly to S3
+        logger.info(f"Uploading blurred NIfTI (approx {len(blurred_nifti_bytes)/1024/1024:.2f} MB) directly to S3...")
+        s3_upload_response = requests.put(blurred_s3_upload_url, data=blurred_nifti_bytes, headers={
+            'Content-Type': 'application/octet-stream' # Ensure correct content type for .nii.gz
         })
-        logger.info(f"📤 Sent blurred data for {original_key} back to backend.")
+        s3_upload_response.raise_for_status()
+        logger.info(f"✅ Blurred NIfTI image successfully uploaded to S3: {blurred_key_for_s3}")
+
+        # Emit only notification to backend (no buffer)
+        sio.emit("blurred-image-uploaded", {
+            "originalKey": original_key,
+            "blurredKey": blurred_key_for_s3
+        })
+        logger.info(f"📤 Sent notification that blurred image {blurred_key_for_s3} is uploaded back to backend.")
+
+
+        # sio.emit("blurred-image", {
+        #     "originalKey": original_key, # Keep originalKey to distinguish in frontend/backend
+        #     "buffer": blurred_b64
+        # })
+        # logger.info(f"📤 Sent blurred data for {original_key} back to backend.")
 
     except requests.exceptions.RequestException as req_err:
         logger.error(f"❌ HTTP/Network error while getting presigned URL or downloading image: {req_err}", exc_info=True)
