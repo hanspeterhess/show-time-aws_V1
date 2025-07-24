@@ -11,7 +11,8 @@ const fs = require('fs').promises; // Import Node.js file system module
 const path = require('path'); // Import path module
 
 const io = socketIo(server, {
-  cors: { origin: "*" }
+  cors: { origin: "*" },
+  maxHttpBufferSize: 1e8, // 100 MB buffer size
 });
 
 require('dotenv').config();
@@ -23,6 +24,8 @@ const bucketName = process.env.BUCKET_NAME;
 const PORT = process.env.PORT || 4000;
 
 let pythonSocket = null;
+
+const dynamoDb = new AWS.DynamoDB.DocumentClient();
 
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
@@ -36,29 +39,63 @@ io.on("connection", (socket) => {
   });
 
   socket.on("blurred-image", async (data) => {
-  const { originalKey, buffer } = data;
-  const blurredKey = originalKey.replace(/\.jpg$/, "_blurred.jpg");
-
-
-  try {
-
+    const { originalKey, buffer } = data;
     const s3 = new AWS.S3();
-    await s3
-      .putObject({
+
+    try {
+      const imageBuffer = Buffer.from(buffer, "base64");
+
+      // Determine the blurred key based on the originalKey's extension
+      let blurredKey;
+      blurredKey = originalKey.replace(/\.nii\.gz$/, '_blurred.nii.gz');
+
+      await s3.putObject({
         Bucket: bucketName,
         Key: blurredKey,
         Body: Buffer.from(buffer, 'base64'),
-        ContentType: "image/jpeg",
+        ContentType: 'application/octet-stream',
       })
       .promise();
 
     console.log("✅ Blurred image uploaded to S3:", blurredKey);
-    io.emit("image-blurred", { blurredKey });
+    io.emit("image-blurred", { blurredKey, originalKey  });
     } catch (err) {
       console.error("❌ Failed to upload blurred image:", err);
     }
   });
+
+  socket.on("image-uploaded-to-s3", async ({ originalKey }) => {
+    console.log(`Frontend reported upload complete for: ${originalKey}`);
+    const s3 = new AWS.S3();
+
+    setTimeout(async () => {
+      try {
+        const headParams = {
+          Bucket: bucketName,
+          Key: originalKey,
+        };
+        await s3.headObject(headParams).promise();
+
+        console.log(`✅ Object ${originalKey} verified in S3. Triggering blurring.`);
+
+        if (pythonSocket) {
+          pythonSocket.emit("blur-image", {
+            originalKey: originalKey
+          });
+          console.log(`📤 Sent blur request for ${originalKey} to Python AS`);
+        } else {
+          console.warn("⚠️ No Python client connected. Image not sent for blurring.");
+        }
+      } catch (err) {
+        console.error(`❌ Failed to verify or request blurring for ${originalKey}:`, err);
+        if (err.code === 'NotFound' || err.statusCode === 404) {
+          console.error(`File ${originalKey} not found in S3 after delay. Cannot proceed with blurring.`);
+        }
+      }
+    }, 5000);
+  });
   
+
   socket.on("disconnect", () => {
     if (socket === pythonSocket) {
       console.log("🐍 Python client disconnected");
@@ -71,23 +108,72 @@ io.on("connection", (socket) => {
 app.use(cors());
 app.use(bodyParser.json());
 
+
+// Endpoint to get a pre-signed S3 URL for downloading/displaying an image
+app.get("/get-image-url", async (req, res) => {
+
+  const { key } = req.query; // Image key (e.g., "uuid.jpg" or "uuid_blurred.jpg")
+  if (!key) {
+      return res.status(400).json({ error: "Image key is required." });
+  }
+
+  const s3 = new AWS.S3();
+  const headParams = {
+    Bucket: bucketName,
+    Key: key,
+  };
+  
+  try {
+    await s3.headObject(headParams).promise();
+    // If headObject succeeds, the object exists. Proceed to generate presigned URL.
+    console.log(`✅ Object ${key} exists in S3. Generating presigned URL.`);
+  } catch (headErr) {
+    if (headErr.code === 'NotFound') {
+      console.warn(`⚠️ Object ${key} not found in S3.`);
+      return res.status(404).json({ error: `Object with key '${key}' not found.` });
+    }
+    console.error(`❌ Error checking S3 object existence for ${key}:`, headErr);
+    return res.status(500).json({ error: "Failed to verify object existence." });
+  }
+
+  const params = {
+      Bucket: bucketName,
+      Key: key,
+      Expires: 300 // URL valid for 300 seconds (5 minutes)
+  };
+
+  s3.getSignedUrl("getObject", params, (err, url) => {
+      if (err) {
+          console.error("❌ S3 Signed URL error for getObject:", err);
+          return res.status(500).json({ error: "Failed to create signed URL." });
+      }
+      res.json({ url });
+      console.log(`✅ Generated S3 signed GET URL for key ${key}`);
+  }); 
+});
+
+
 // Simple health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "Backend is running" });
 });
 
-const dynamoDb = new AWS.DynamoDB.DocumentClient();
 
 // Endpoint to get a pre-signed S3 URL for image uploads
-app.get("/upload-image", async (req, res) => {
+app.get("/get-upload-url", async (req, res) => {
   const s3 = new AWS.S3();
-  const fileName = `${uuidv4()}.jpg`;
+  const originalFileName = req.query.fileName;
+  const fileName = `${uuidv4()}.nii.gz`;
+
+  if (!originalFileName) {
+    return res.status(400).json({ error: "fileName is required" });
+  }
 
   const params = {
     Bucket: bucketName,
     Key: fileName,
     Expires: 60, // URL expires in 60 seconds
-    ContentType: "image/jpeg", // Expecting JPEG images
+    ContentType: "application/octet-stream", 
   };
 
 
@@ -97,39 +183,11 @@ app.get("/upload-image", async (req, res) => {
       return res.status(500).json({ error: "Failed to create signed URL" });
     }
     console.log("✅ Generated S3 signed URL:", { fileName, url });
-
     res.json({ uploadUrl: url, fileName });
 
-    // After getting the signed URL, set a timeout to download the image from S3
-    // and send it to the Python client for blurring.
-    // Give the frontend client some time to upload the image to S3.
-    setTimeout(async () => {
-      try {
-        const image = await s3
-          .getObject({ Bucket: bucketName, Key: fileName })
-          .promise();
-
-        console.log("📥 Downloaded image from S3:", fileName);
-
-        // Convert image buffer to base64 string for Socket.IO transmission
-        const base64Buffer = image.Body.toString("base64");
-
-        if (pythonSocket) {
-          // Emit the image to the Python client for blurring
-          pythonSocket.emit("blur-image", {
-            originalKey: fileName,
-            buffer: base64Buffer,
-          });
-          console.log("📤 Sent image to Python for blurring");
-        } else {
-          console.warn("⚠️ No Python client connected. Image not sent for blurring.");
-        }
-      } catch (err) {
-        console.error("❌ Failed to download uploaded image from S3:", err);
-      }
-    }, 5000); // 5-second delay
   });
 });
+
 
 // Endpoint to store a timestamp in DynamoDB
 app.post("/store-time", async (req, res) => {
