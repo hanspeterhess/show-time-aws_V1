@@ -102,7 +102,7 @@ function App() {
       
       setOriginalFileName(uploadedFileName);
 
-      socket.emit("image-uploaded-to-s3", { originalKey: receivedFileName });
+      socket.emit("image-uploaded-to-s3", { originalKey: uploadedFileName });
 
       alert("File uploaded successfully! Processing will begin shortly.");
     } catch (err) {
