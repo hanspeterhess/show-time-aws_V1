@@ -21,9 +21,13 @@ const tableName = process.env.TABLE_NAME;
 const bucketName = process.env.BUCKET_NAME;
 const PORT = process.env.PORT || 4000;
 
-let pythonSocket = null;
+const ORCHESTRATOR_LAMBDA_NAME = process.env.ORCHESTRATOR_LAMBDA_NAME;
+const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
+const BACKEND_ALB_DNS = process.env.BACKEND_ALB_DNS; // For callback URL construction
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
+const lambda = new AWS.Lambda();
+const sqs = new AWS.SQS(); 
 
 // S3 Helper Functions
 const s3BackendService = {
@@ -35,6 +39,7 @@ const s3BackendService = {
       Key: key,
       Expires: expiresSeconds,
     };
+    
     try {
       const url = await s3.getSignedUrlPromise(action, params);
       console.log(`✅ Generated S3 presigned ${action.toUpperCase()} URL for key: ${key}`);
@@ -45,7 +50,6 @@ const s3BackendService = {
     }
   },
 
-  // Checks if an object exists in S3 using headObject
   checkS3ObjectExists: async (key) => {
     const s3 = new AWS.S3();
     const params = {
@@ -71,63 +75,28 @@ const s3BackendService = {
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
 
-  // tag this as the Python client if it identifies itself
-  socket.on("identify", (data) => {
-    if (data.role === "python-client") {
-      pythonSocket = socket;
-      console.log("🐍 Registered Python client:", socket.id);
-    }
-  });
-
-  socket.on("blurred-image-uploaded", ({ originalKey, blurredKey }) => { // Renamed event and data structure
-    console.log("✅ Blurred image uploaded by AS to S3:", blurredKey);
-    io.emit("image-blurred", { blurredKey, originalKey }); // Notify frontend
-  });
-
-  socket.on("image-uploaded-to-s3", async ({ originalKey }) => {
-    console.log(`Frontend reported upload complete for: ${originalKey}`);
-
-    setTimeout(async () => {
-      try {
-        const exists = await s3BackendService.checkS3ObjectExists(originalKey);
-        if (!exists) {
-          console.error(`File ${originalKey} not found in S3 after delay. Cannot proceed with blurring.`);
-          io.emit("upload-error", { message: `File ${originalKey} not found in S3.` });
-          return;
-        }
-
-        console.log(`✅ Object ${originalKey} verified in S3. Triggering blurring.`);
-
-        if (pythonSocket) {
-          pythonSocket.emit("blur-image", {
-            originalKey: originalKey
-          });
-          console.log(`📤 Sent blur request for ${originalKey} to Python AS`);
-        } else {
-          console.warn("⚠️ No Python client connected. Image not sent for blurring.");
-        }
-      } catch (err) {
-        console.error(`❌ Failed to verify or request blurring for ${originalKey}:`, err);
-        if (err.code === 'NotFound' || err.statusCode === 404) {
-          console.error(`File ${originalKey} not found in S3 after delay. Cannot proceed with blurring.`);
-        }
-      }
-    }, 5000);
-  });
-  
-
-  socket.on("disconnect", () => {
-    if (socket === pythonSocket) {
-      console.log("🐍 Python client disconnected");
-      pythonSocket = null;
-    }
-  });
-  
 });
+
 
 app.use(cors());
 app.use(bodyParser.json());
 
+// Endpoint for AS ECS task to call back to after blurring is complete
+app.post("/blurred-image-callback", (req, res) => {
+    const { originalKey, blurredKey, error } = req.body; // Added error field
+    if (error) {
+        console.error(`❌ Backend: Lambda callback reported error for ${originalKey}: ${error}`);
+        io.emit("processing-error", { originalKey, message: `Processing failed: ${error}` });
+        return res.status(200).json({ status: "error", message: "Callback received with error" });
+    }
+    if (!originalKey || !blurredKey) {
+        console.error("❌ Backend: Missing originalKey or blurredKey in callback.");
+        return res.status(400).json({ error: "Missing originalKey or blurredKey in callback." });
+    }
+    console.log(`✨ Backend: AS callback received for original: ${originalKey}, blurred: ${blurredKey}`);
+    io.emit("image-blurred", { blurredKey, originalKey }); // Notify frontend
+    res.json({ status: "success", message: "Callback received" });
+});
 
 // Endpoint to get a pre-signed S3 URL for downloading/displaying an image
 app.get("/get-image-url", async (req, res) => {
@@ -225,6 +194,40 @@ app.post("/store-time", async (req, res) => {
   res.json({ status: "ok", time });
 });
 
+// Endpoint for Frontend to invoke blurring (now invokes Lambda)
+app.post("/invoke-blur-process", async (req, res) => { // Renamed from /invoke-blur-lambda
+    const { originalKey } = req.body;
+    if (!originalKey) {
+        return res.status(400).json({ error: "originalKey is required to invoke blurring." });
+    }
+
+    if (!ORCHESTRATOR_LAMBDA_NAME || !SQS_QUEUE_URL) {
+        console.error("Orchestrator Lambda or SQS Queue not configured. Cannot initiate blurring.");
+        return res.status(500).json({ error: "Blurring service not configured." });
+    }
+
+    try {
+        await sqs.sendMessage({
+            QueueUrl: SQS_QUEUE_URL,
+            MessageBody: JSON.stringify({ originalKey: originalKey }),
+        }).promise();
+        console.log(`✅ Message sent to SQS queue ${SQS_QUEUE_URL} for originalKey: ${originalKey}`);
+
+        // 2. Invoke the orchestrator Lambda (to scale up ECS if needed)
+        const payload = { originalKey: originalKey }; // Lambda needs originalKey to decide if it should scale up
+        const invokeResult = await lambda.invoke({
+            FunctionName: ORCHESTRATOR_LAMBDA_NAME,
+            InvocationType: 'Event', // Asynchronous invocation
+            Payload: JSON.stringify(payload),
+        }).promise();
+
+        console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} for ${originalKey}`);
+        res.json({ status: "success", message: "Blurring process initiated. Check status via frontend updates." });
+    } catch (err) {
+        console.error(`❌ Error initiating blurring process:`, err);
+        res.status(500).json({ error: "Failed to initiate blurring process." });
+    }
+});
 
 // Start the server
 server.listen(PORT, () => {
@@ -232,4 +235,7 @@ server.listen(PORT, () => {
   console.log(`Expecting AWS_REGION: ${process.env.AWS_REGION}`);
   console.log(`Expecting TABLE_NAME: ${process.env.TABLE_NAME}`);
   console.log(`Expecting BUCKET_NAME: ${process.env.BUCKET_NAME}`);
+  console.log(`Expecting ORCHESTRATOR_LAMBDA_NAME: ${process.env.ORCHESTRATOR_LAMBDA_NAME || 'NOT SET'}`);
+  console.log(`Expecting SQS_QUEUE_URL: ${process.env.SQS_QUEUE_URL || 'NOT SET'}`);
+  console.log(`Expecting BACKEND_ALB_DNS: ${process.env.BACKEND_ALB_DNS || 'NOT SET'}`);
 });

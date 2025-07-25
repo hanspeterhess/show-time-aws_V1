@@ -22,9 +22,7 @@ const s3FrontendService = {
     }
   },
 
-  // Uploads a file to S3 using a presigned PUT URL obtained from the backend
   uploadFileToS3: async (file, backendUploadUrlEndpoint) => {
-    // 1. Get presigned PUT URL from backend
     const fileName = `${uuidv4()}.nii.gz`; // Enforce .nii.gz extension
     console.log(`Frontend: Requesting upload URL for fileName: ${fileName}`);
 
@@ -33,10 +31,9 @@ const s3FrontendService = {
     
     console.log("Frontend: Received fileName from backend for upload:", receivedFileName);
 
-    // 2. Upload file directly to S3 using the presigned URL
     await axios.put(uploadUrl, file, {
       headers: {
-        "Content-Type": "application/octet-stream", // Content-Type for .nii.gz
+        "Content-Type": "application/octet-stream",
       },
     });
 
@@ -51,8 +48,8 @@ function App() {
   const [originalFileName, setOriginalFileName] = useState("");
   const [blurredFileName, setBlurredFileName] = useState("");
   const [blurredDownloadUrl, setBlurredDownloadUrl] = useState("");
+  const [processingStatus, setProcessingStatus] = useState("idle");
 
-  // Function to initiate download
   const handleDownloadBlurred = async () => {
     if (!blurredDownloadUrl || !blurredFileName) {
       alert("Blurred image not ready for download.");
@@ -95,14 +92,20 @@ function App() {
       setImageFile(null); // Clear selected file
       return;
     }
+    
+    setProcessingStatus("uploading"); // Set status to uploading
+    setBlurredFileName(""); // Clear previous blurred file info
+    setBlurredDownloadUrl("");
 
     try {
-
       const { uploadedFileName } = await s3FrontendService.uploadFileToS3(imageFile, `${BACKEND_URL}/get-upload-url`);
       
       setOriginalFileName(uploadedFileName);
-
       socket.emit("image-uploaded-to-s3", { originalKey: uploadedFileName });
+
+      //Call backend endpoint to invoke the blurring process (which uses Lambda/SQS)
+      console.log(`Frontend: Requesting backend to initiate blurring for originalKey: ${uploadedFileName}`);
+      await axios.post(`${BACKEND_URL}/invoke-blur-process`, { originalKey: uploadedFileName });
 
       alert("File uploaded successfully! Processing will begin shortly.");
     } catch (err) {
@@ -151,6 +154,13 @@ function App() {
       alert("Blurred image is ready for download!");
     });
 
+    // Handle processing errors from backend
+    socket.on("processing-error", (data) => {
+        alert(`Processing Error: ${data.message}`);
+        console.error("Backend processing error:", data.message);
+        setProcessingStatus("error"); // Set status to error
+    });
+
     socket.on("upload-error", (data) => {
         alert(`Upload Error: ${data.message}`);
         console.error("Backend upload error:", data.message);
@@ -164,6 +174,7 @@ function App() {
       socket.off("image-blurred");
       socket.off("image-uploaded-to-s3");
       socket.off("upload-error");
+      socket.off("processing-error");
     };
   }, []);
  
