@@ -14,14 +14,14 @@ ECS_SERVICE_NAME = os.environ.get('ECS_SERVICE_NAME')
 
 def lambda_handler(event, context):
  logger.info(f"Received event: {json.dumps(event)}")
- original_key = event.get('originalKey')
+#  original_key = event.get('originalKey')
 
- if not original_key:
-     logger.error("Missing 'originalKey' in event payload.")
-     return {
-         'statusCode': 400,
-         'body': 'Missing originalKey'
-     }
+#  if not original_key:
+#      logger.error("Missing 'originalKey' in event payload.")
+#      return {
+#          'statusCode': 400,
+#          'body': 'Missing originalKey'
+#      }
 
  if not ECS_CLUSTER_NAME or not ECS_SERVICE_NAME:
      logger.error("Missing required environment variables for ECS.")

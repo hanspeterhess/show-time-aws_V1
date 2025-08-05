@@ -53,14 +53,15 @@ const s3FrontendService = {
 };
 
 function AppContent() {
-    const { 
-      isAuthenticated, 
-      loginWithRedirect, 
-      logout, 
-      getAccessTokenSilently,
-      user,
-      isLoading
-    } = useAuth0();
+  const { 
+    isAuthenticated, 
+    loginWithRedirect, 
+    logout, 
+    getAccessTokenSilently,
+    user,
+    isLoading
+  } = useAuth0();
+
 
   const [storedTime, setStoredTime] = useState(null);
   const [imageFile, setImageFile] = useState(null);
@@ -149,6 +150,26 @@ function AppContent() {
       }
     }
   };
+  
+  useEffect(() => {
+    const notifyBackendOfLogin = async () => {
+      if (isAuthenticated) {
+        try {
+          const token = await getAccessTokenSilently();
+          const response = await axios.post(`${BACKEND_URL}/user-logged-in`, {}, {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          });
+          console.log("Backend notified of login:", response.data);
+          // You could also store this state if needed
+        } catch (error) {
+          console.error("Error notifying backend of login:", error);
+        }
+      }
+    };
+    notifyBackendOfLogin();
+  }, [isAuthenticated, getAccessTokenSilently]);
 
   useEffect(() => {
     socket.on('connect', () => {

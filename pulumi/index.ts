@@ -667,6 +667,7 @@ const asSqsScalingDownPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-dow
         ],
     },
 });
+
 const asQueueDepthAlarm = new aws.cloudwatch.MetricAlarm("as-queue-depth-alarm", {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     evaluationPeriods: 1,

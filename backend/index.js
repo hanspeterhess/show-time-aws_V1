@@ -24,10 +24,9 @@ const PORT = process.env.PORT || 4000;
 
 const ORCHESTRATOR_LAMBDA_NAME = process.env.ORCHESTRATOR_LAMBDA_NAME;
 const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
-// const BACKEND_ALB_DNS = process.env.BACKEND_ALB_DNS;
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
-// const lambda = new AWS.Lambda();
+const lambda = new AWS.Lambda();
 const sqs = new AWS.SQS(); 
 
 // S3 Helper Functions
@@ -82,19 +81,6 @@ io.on("connection", (socket) => {
 app.use(cors());
 app.use(bodyParser.json());
 
-// Debug
-// app.use((req, res, next) => {
-//   const authHeader = req.headers.authorization;
-//   if (authHeader) {
-//     console.log('Incoming Authorization Header:', authHeader);
-//     // Extract the token to log just the token itself
-//     const token = authHeader.split(' ')[1];
-//     if (token) {
-//       console.log('Incoming JWT:', token);
-//     }
-//   }
-//   next(); // Pass control to the next middleware
-// });
 
 // Auth0 JWT Validation Middleware
 // This middleware will check for a valid JWT in the Authorization header
@@ -171,25 +157,6 @@ app.get("/get-upload-url", checkJwt, async (req, res) => {
   }
 });
 
-// // get a pre-signed S3 URL for blurred image uploads (from AS)
-// app.get("/get-blurred-upload-url", async (req, res) => {
-//     const { originalKey } = req.query;
-
-//     if (!originalKey) {
-//         return res.status(400).json({ error: "originalKey is required." });
-//     }
-
-//     // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
-//     let blurredKey = originalKey.replace(/\.nii\.gz$/, '_segmented.nii.gz');
-
-//     try {
-//         const uploadUrl = await s3BackendService.generatePresignedUrl(blurredKey, "putObject", 120); // 120 seconds expiry
-//         res.json({ uploadUrl: uploadUrl, blurredKey: blurredKey });
-//     } catch (err) {
-//         res.status(500).json({ error: "Failed to create signed URL for blurred image." });
-//     }
-// });
-
 // Endpoint to store a timestamp in DynamoDB
 app.post("/store-time", async (req, res) => {
   const time = new Date().toISOString();
@@ -253,6 +220,29 @@ app.post("/invoke-blur-process", checkJwt, async (req, res) => {
     } catch (err) {
         console.error(`❌ Error initiating blurring process:`, err);
         res.status(500).json({ error: "Failed to initiate blurring process." });
+    }
+});
+
+app.post("/user-logged-in", checkJwt, async (req, res) => {
+    console.log("✅ Backend received login notification from an authenticated user.");
+    
+    try {
+        // The payload for this Lambda can be empty or contain user-specific data if needed
+        const payload = {}; 
+        
+        const invokeParams = {
+            FunctionName: ORCHESTRATOR_LAMBDA_NAME,
+            InvocationType: 'Event', // Asynchronous invocation
+            Payload: JSON.stringify(payload),
+        };
+
+        await lambda.invoke(invokeParams).promise();
+
+        console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} after user login.`);
+        res.json({ status: "success", message: "Orchestrator Lambda invoked." });
+    } catch (err) {
+        console.error(`❌ Error invoking orchestrator Lambda:`, err);
+        res.status(500).json({ error: "Failed to invoke orchestrator Lambda." });
     }
 });
 
