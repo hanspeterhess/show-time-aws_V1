@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@auth0/auth0-react": "^2.4.0",
     "@pulumi/aws": "^6.83.0",
     "@pulumi/awsx": "^2.22.0",
     "@pulumi/docker": "^4.8.0",

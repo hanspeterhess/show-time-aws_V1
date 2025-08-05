@@ -4,6 +4,7 @@ import * as awsx from "@pulumi/awsx";
 import * as fs from "fs";
 import * as path from "path";
 import * as docker from "@pulumi/docker";
+import * as docker_build from "@pulumi/docker-build"; //
 
 
 // --- Configuration ---
@@ -16,6 +17,13 @@ const backendApiDomainName = config.require("backendApiDomainName");
 // Image tags for backend and analysis server, defaulting to "latest" if not specified
 const backendImageTag = config.get("backendImageTag") || "b_latest";
 const asImageTag = config.get("asImageTag") || "as_latest";
+const auth0IssuerBaseUrl = config.get("auth0IssuerBaseUrl");
+if (!auth0IssuerBaseUrl) {
+    throw new Error("auth0IssuerBaseUrl is not set in Pulumi config. Please set it with 'pulumi config set auth0IssuerBaseUrl <your-auth0-issuer-url>'");
+}
+if (auth0IssuerBaseUrl.startsWith("http")) {
+    throw new Error("auth0IssuerBaseUrl should not start with 'http://' or 'https://'. Please provide the domain only, e.g., 'dev-xyz.us.auth0.com'");
+}
 
 // --- SSH Key Pair for EC2 Instances ---
 const homeDir = process.env.HOME || process.env.USERPROFILE || ""; // Covers Linux, macOS, Windows
@@ -49,23 +57,61 @@ const asRepo = new aws.ecr.Repository("analysis-server-repo", {
     tags: { Project: "orthelot"},
 });
 
-// --- Docker Images for ECR ---
-const backendImage = new docker.Image("backend-image", {
-    imageName: pulumi.interpolate`${backendRepo.repositoryUrl}:${backendImageTag}`,
-    build: {
-        context: "../backend",
-        dockerfile: "../backend/Dockerfile.backend",
-        platform: "linux/amd64",
+// // --- Docker Images for ECR ---
+// const backendImage = new docker.Image("backend-image", {
+//     imageName: pulumi.interpolate`${backendRepo.repositoryUrl}:${backendImageTag}`,
+//     build: {
+//         context: "../backend",
+//         dockerfile: "../backend/Dockerfile.backend",
+//         platform: "linux/amd64",
+//         // Use noCache to ensure we always build the latest image
+//         noCache: true,
+//     },
+//     registry: backendRepo.repositoryUrl.apply(repoUrl => {
+//         const server = repoUrl.split("/")[0];
+//         return aws.ecr.getCredentialsOutput({ registryId: backendRepo.registryId }).apply(creds => {
+//             const decodedCreds = Buffer.from(creds.authorizationToken, "base64").toString();
+//             const [username, password] = decodedCreds.split(":");
+//             return {server, username, password };
+//         });
+//     }),
+// });
+
+const backendImage = new docker_build.Image("backend-image", {
+    // Note: The `imageName` property might be different,
+    // often specified via `tags` and `exports`.
+    // The `docker-build` provider is more aligned with BuildKit's `docker buildx build`
+    // which pushes to a registry if `push: true` is set, and uses `tags`.
+
+    tags: [pulumi.interpolate`${backendRepo.repositoryUrl}:${backendImageTag}`],
+    context: {
+        location: "../backend", // This is the path to your build context
     },
-    registry: backendRepo.repositoryUrl.apply(repoUrl => {
-        const server = repoUrl.split("/")[0];
-        return aws.ecr.getCredentialsOutput({ registryId: backendRepo.registryId }).apply(creds => {
-            const decodedCreds = Buffer.from(creds.authorizationToken, "base64").toString();
-            const [username, password] = decodedCreds.split(":");
-            return {server, username, password };
-        });
-    }),
+    dockerfile: {
+        location: "../backend/Dockerfile.backend", // Relative to the 'context.location'
+    },
+    platforms: ["linux/amd64"],
+    noCache: true, // This is the property you were looking for!
+    push: true, // Crucial to push the image to ECR
+    registries: [
+        backendRepo.repositoryUrl.apply(repoUrl => {
+            const address = repoUrl.split("/")[0]; // ECR repository URL typically includes the server address
+            return aws.ecr.getCredentialsOutput({ registryId: backendRepo.registryId }).apply(creds => {
+                const decodedCreds = Buffer.from(creds.authorizationToken, "base64").toString();
+                const [username, password] = decodedCreds.split(":");
+                return {
+                    address: address, // Use 'address' here
+                    username: username,
+                    password: password,
+                };
+            });
+        }),
+    ],
+
+    // You might also need this if your Dockerfile depends on an external image update
+    // pull: true, // Forces pulling the base image every time
 });
+// const asImageTag = `latest-${new Date().getTime()}`;
 
 const asImage = new docker.Image("as-image", {
     imageName: pulumi.interpolate`${asRepo.repositoryUrl}:${asImageTag}`,
@@ -142,7 +188,8 @@ const bucketCors = new aws.s3.BucketCorsConfigurationV2("upload-bucket-cors", {
     bucket: bucket.id,
     corsRules: [{
         allowedHeaders: ["*"], // Allow all headers
-        allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"], // Methods allowed from your frontend
+        // allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"], // Methods allowed from your frontend
+        allowedMethods: ["GET", "PUT", "POST", "DELETE"], // Methods allowed from your frontend
         allowedOrigins: [
             "https://dev-t.aikeso.com",
             "https://www.dev-t.aikeso.com",
@@ -175,6 +222,40 @@ const ecsS3Policy = new aws.iam.Policy("ecs-s3-policy", {
 new aws.iam.RolePolicyAttachment("ecs-s3-policy-attachment", {
     role: ecsTaskRole.name,
     policyArn: ecsS3Policy.arn,
+});
+
+// S3 Bucket for AI Models
+const aiModelsBucket = new aws.s3.Bucket("aiModelsBucket", {
+    // It's good practice to prevent accidental deletion of important model data
+    forceDestroy: true, // Consider removing this for production models
+});
+
+
+// IAM Policy for AS tasks to access the AI Models S3 bucket
+const aiModelsS3AccessPolicy = new aws.iam.Policy("ai-models-s3-access-policy", {
+    description: "Allows ECS tasks to read from the AI Models S3 bucket",
+    policy: aiModelsBucket.arn.apply(arn => JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+            {
+                Effect: "Allow",
+                Action: [
+                    "s3:GetObject",
+                    "s3:ListBucket", // Often useful to list contents if models are in subfolders
+                ],
+                Resource: [
+                    arn,      // Permission for the bucket itself (for ListBucket)
+                    `${arn}/*`, // Permission for objects within the bucket (for GetObject)
+                ],
+            },
+        ],
+    })),
+});
+
+// Attach AI Models S3 access policy to the shared ECS Task Role
+new aws.iam.RolePolicyAttachment("ecs-ai-models-s3-access-policy-attachment", {
+    role: ecsTaskRole.name,
+    policyArn: aiModelsS3AccessPolicy.arn,
 });
 
 
@@ -280,9 +361,18 @@ const instanceProfile = new aws.iam.InstanceProfile("ecsInstanceProfile", {
 });
 
 // get ECS optimized AMI
-const ami = aws.ec2.getAmi({
+const ami_backend = aws.ec2.getAmi({
     filters: [
         { name: "name", values: ["amzn2-ami-ecs-hvm-*-x86_64-ebs"] },
+        { name: "owner-alias", values: ["amazon"] },
+    ],
+    mostRecent: true,
+});
+
+// get ECS optimized AMI
+const ami_as = aws.ec2.getAmi({
+    filters: [
+        { name: "name", values: ["amzn2-ami-ecs-gpu-hvm-*-x86_64-ebs"] },
         { name: "owner-alias", values: ["amazon"] },
     ],
     mostRecent: true,
@@ -305,7 +395,7 @@ echo ECS_CONTAINER_INSTANCE_TAGS='{"Project": "TimeStoreApp", "Role": "analysis-
 
 // --- Launch Templates ---
 const backendLaunchTemplate = new aws.ec2.LaunchTemplate("ecs-backend-launch-template", {
-    imageId: ami.then(a => a.id),
+    imageId: ami_backend.then(a => a.id),
     instanceType: "t3.micro",
     keyName: keyPair.keyName,
     iamInstanceProfile: { name: instanceProfile.name, },
@@ -318,8 +408,8 @@ const backendLaunchTemplate = new aws.ec2.LaunchTemplate("ecs-backend-launch-tem
 });
 
 const asLaunchTemplate = new aws.ec2.LaunchTemplate("ecs-as-launch-template", {
-    imageId: ami.then(a => a.id),
-    instanceType: "t3.medium", 
+    imageId: ami_as.then(a => a.id),
+    instanceType: "g4dn.xlarge", 
     keyName: keyPair.keyName,
     iamInstanceProfile: { name: instanceProfile.name, },
     vpcSecurityGroupIds: [asTaskSg.id], // AS tasks use their own SG
@@ -413,8 +503,8 @@ const lbListenerHttpRedirect = new aws.lb.Listener("backend-listener-http-redire
 // --- ECS Task Definition for Analysis Server (AS) ---
 const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
     family: "as-task",
-    cpu: "1024",
-    memory: "2048",
+    cpu: "4096", // 4 vCPUs
+    memory: "12288", // 12 GiB
     networkMode: "bridge",
     requiresCompatibilities: ["EC2"],
     executionRoleArn: ecsTaskRole.arn,
@@ -424,7 +514,8 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
         asLogGroup.name,
         asProcessingQueue.url,
         backendApiDomainName,
-    ]).apply(([imageName, logGroupName, sqsQueueUrl, apiDomainName]) =>
+        aiModelsBucket.bucket,
+    ]).apply(([imageName, logGroupName, sqsQueueUrl, apiDomainName, aiModelsBucketName]) =>
         JSON.stringify([
             {
                 name: "analysis-server",
@@ -443,14 +534,15 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
                     { name: "BACKEND_CALLBACK_URL", value: `https://${apiDomainName}/blurred-image-callback` },
                     { name: "BACKEND_SERVER_URL", value: `https://${apiDomainName}` },
                     { name: "AWS_REGION", value: region },
+                    { name: "AI_MODELS_BUCKET_NAME", value: aiModelsBucketName },
                 ],
+                resourceRequirements: [{
+                    type: "GPU",
+                    value: "1",
+                }],
             },
         ])
     ),
-    placementConstraints: [{
-        type: "memberOf",
-        expression: "attribute:ecs.instance-type == t3.medium" // Updated to t3.medium
-    }],
 });
 
 
@@ -463,7 +555,7 @@ const asAutoScalingGroup = new aws.autoscaling.Group("ecs-as-asg", {
     vpcZoneIdentifiers: vpc.privateSubnetIds,
     minSize: 0, // Min size 0 for on-demand scaling
     maxSize: 1,
-    desiredCapacity: 0, // Desired capacity 0
+    desiredCapacity: 1, // Desired capacity 0
     launchTemplate: { id: asLaunchTemplate.id, version: "$Latest" },
     protectFromScaleIn: true, // Prevent ASG from scaling in automatically
     tags: [
@@ -529,7 +621,22 @@ const asScalableTarget = new aws.appautoscaling.Target("as-scalable-target", {
     serviceNamespace: "ecs",
 });
 
-const asSqsScalingPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-policy", {
+// const asSqsScalingPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-policy", {
+//     policyType: "StepScaling",
+//     resourceId: asScalableTarget.resourceId,
+//     scalableDimension: asScalableTarget.scalableDimension,
+//     serviceNamespace: asScalableTarget.serviceNamespace,
+//     stepScalingPolicyConfiguration: {
+//         adjustmentType: "ChangeInCapacity",
+//         cooldown: 60, // Cooldown period in seconds
+//         stepAdjustments: [
+//             { metricIntervalUpperBound: "0", scalingAdjustment: -1 }, // If queue has 0 messages, scale down by 1
+//             { metricIntervalLowerBound: "0", scalingAdjustment: 1 }, // If queue has > 0 messages, scale up by 1
+//         ],
+//     },
+// });
+
+const asSqsScalingUpPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-up-policy", {
     policyType: "StepScaling",
     resourceId: asScalableTarget.resourceId,
     scalableDimension: asScalableTarget.scalableDimension,
@@ -538,12 +645,26 @@ const asSqsScalingPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-policy"
         adjustmentType: "ChangeInCapacity",
         cooldown: 60, // Cooldown period in seconds
         stepAdjustments: [
-            { metricIntervalUpperBound: "0", scalingAdjustment: -1 }, // If queue has 0 messages, scale down by 1
-            { metricIntervalLowerBound: "0", scalingAdjustment: 1 }, // If queue has > 0 messages, scale up by 1
+            // This policy only handles scaling UP
+            { metricIntervalLowerBound: "0", scalingAdjustment: 1 }, // If metric > 0, scale up by 1
         ],
     },
 });
 
+const asSqsScalingDownPolicy = new aws.appautoscaling.Policy("as-sqs-scaling-down-policy", {
+    policyType: "StepScaling",
+    resourceId: asScalableTarget.resourceId,
+    scalableDimension: asScalableTarget.scalableDimension,
+    serviceNamespace: asScalableTarget.serviceNamespace,
+    stepScalingPolicyConfiguration: {
+        adjustmentType: "ChangeInCapacity",
+        cooldown: 300, // Often use a longer cooldown for scale-down to prevent rapid cycling
+        stepAdjustments: [
+            // This policy only handles scaling DOWN
+            { metricIntervalUpperBound: "0", scalingAdjustment: -1 }, // If metric <= 0, scale down by 1
+        ],
+    },
+});
 const asQueueDepthAlarm = new aws.cloudwatch.MetricAlarm("as-queue-depth-alarm", {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     evaluationPeriods: 1,
@@ -554,20 +675,20 @@ const asQueueDepthAlarm = new aws.cloudwatch.MetricAlarm("as-queue-depth-alarm",
     threshold: 1, // Trigger if 1 or more messages are visible
     alarmDescription: "Alarm when SQS queue has messages, to scale up AS service",
     dimensions: { QueueName: asProcessingQueue.name},
-    alarmActions: [asSqsScalingPolicy.arn], 
+    alarmActions: [asSqsScalingUpPolicy.arn], 
 });
 
 const asQueueEmptyAlarm = new aws.cloudwatch.MetricAlarm("as-queue-empty-alarm", {
     comparisonOperator: "LessThanOrEqualToThreshold",
-    evaluationPeriods: 5, // Evaluate over 5 minutes
-    metricName: "ApproximateNumberOfMessagesVisible",
+    evaluationPeriods: 10, // Evaluate over 5 minutes
+    metricName: "NumberOfMessagesSent",
     namespace: "AWS/SQS",
     period: 60,
-    statistic: "Average",
+    statistic: "Maximum",
     threshold: 0, // Trigger if queue is empty
     alarmDescription: "Alarm when SQS queue is empty, to scale down AS service",
     dimensions: { QueueName: asProcessingQueue.name },
-    alarmActions: [asSqsScalingPolicy.arn], 
+    alarmActions: [asSqsScalingDownPolicy.arn], 
 });
 
 // --- AWS Lambda Function for Orchestration ---
@@ -631,7 +752,7 @@ const orchestratorCodeDir = "./orchestrator_lambda";
 
 const orchestratorLambda = new aws.lambda.Function("orchestrator-lambda", {
      code: new pulumi.asset.FileArchive(orchestratorCodeDir), // Use FileArchive to zip the directory
-    runtime: aws.lambda.Runtime.Python3d9,
+    runtime: aws.lambda.Runtime.Python3d10, // Use the latest Python 3 runtime
     handler: "main.lambda_handler", // Handler is 'filename.function_name' (e.g., main.py -> main.lambda_handler)
     role: orchestratorLambdaRole.arn,
     timeout: 30,
@@ -670,7 +791,7 @@ const backendTaskDefinition = new aws.ecs.TaskDefinition("ecs-backend-task", {
     executionRoleArn: ecsTaskRole.arn,
     taskRoleArn: ecsTaskRole.arn,    
     containerDefinitions: pulumi.all([
-        backendImage.imageName,
+        backendImage.ref,
         table.name,
         backendLogGroup.name,
         bucket.bucket,
@@ -735,7 +856,10 @@ TABLE_NAME=${tableName}
 PORT=4000
 BUCKET_NAME=${bucketName}
 BACKEND_URL=https://${apiDomainName} # Frontend will use this
-ALB_DNS_NAME=${lbDnsName} #
+ALB_DNS_NAME=${lbDnsName} 
+AUTH0_AUDIENCE=https://${apiDomainName}
+AUTH0_ISSUER_BASE_URL=https://${auth0IssuerBaseUrl}/
+
 `.trim();
 
     const envFilePath = path.join(__dirname, "../backend/.env");
@@ -745,25 +869,23 @@ ALB_DNS_NAME=${lbDnsName} #
   });
 
 // --- Exports ---
-export const tableName = table.name;
-export const ecrBackendRepoUrl = backendRepo.repositoryUrl;
-export const ecrBackendRepoName = backendRepo.name;
-export const ecrAsRepoUrl = asRepo.repositoryUrl;
-export const ecrAsRepoName = asRepo.name;
+// export const tableName = table.name;
+// export const ecrBackendRepoUrl = backendRepo.repositoryUrl;
+// export const ecrBackendRepoName = backendRepo.name;
+// export const ecrAsRepoUrl = asRepo.repositoryUrl;
+// export const ecrAsRepoName = asRepo.name;
+// export const bucketName = bucket.bucket;
+// export const backendEcsServiceName = backendService.name;
+// export const ecsClusterName = appCluster.name; 
+// export const backendEcsTaskDefinitionArn = backendTaskDefinition.arn; 
+// export const ecspubKeyPath = pubKeyPath;
+// export const backendLoadBalancerDnsName = lb.dnsName;
+// export const backendApiCustomDomain = backendApiDomainName; 
+// export const asOrchestratorLambdaFunctionName = orchestratorLambda.name; 
+// export const asProcessingQueueUrl = asProcessingQueue.url;
+// export const asEcsServiceName = asService.name; 
+// export const aiModelsBucketName = aiModelsBucket.bucket;
 
-export const bucketName = bucket.bucket;
 
-export const backendEcsServiceName = backendService.name;
-export const ecsClusterName = appCluster.name; 
-
-export const backendEcsTaskDefinitionArn = backendTaskDefinition.arn; 
-
-export const ecspubKeyPath = pubKeyPath;
-
-export const backendLoadBalancerDnsName = lb.dnsName;
-export const backendApiCustomDomain = backendApiDomainName; 
-
-export const asOrchestratorLambdaFunctionName = orchestratorLambda.name; 
-export const asProcessingQueueUrl = asProcessingQueue.url;
-export const asEcsServiceName = asService.name; 
-
+lb.dnsName.apply(dns => console.log(`Make sure in Cloudflare, record "apt-t" points to ${dns}`));
+// export const backendLoadBalancerDnsName = lb.dnsName;

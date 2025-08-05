@@ -7,6 +7,7 @@ const app = express();
 const server = http.createServer(app);
 const AWS = require("aws-sdk"); 
 const { v4: uuidv4 } = require("uuid");
+const { auth } = require('express-oauth2-jwt-bearer'); // Auth0 JWT validation middleware
 
 const io = socketIo(server, {
   cors: { origin: "*" },
@@ -26,7 +27,7 @@ const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
 const BACKEND_ALB_DNS = process.env.BACKEND_ALB_DNS; // For callback URL construction
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
-const lambda = new AWS.Lambda();
+// const lambda = new AWS.Lambda();
 const sqs = new AWS.SQS(); 
 
 // S3 Helper Functions
@@ -81,6 +82,28 @@ io.on("connection", (socket) => {
 app.use(cors());
 app.use(bodyParser.json());
 
+// Debug
+// app.use((req, res, next) => {
+//   const authHeader = req.headers.authorization;
+//   if (authHeader) {
+//     console.log('Incoming Authorization Header:', authHeader);
+//     // Extract the token to log just the token itself
+//     const token = authHeader.split(' ')[1];
+//     if (token) {
+//       console.log('Incoming JWT:', token);
+//     }
+//   }
+//   next(); // Pass control to the next middleware
+// });
+
+// Auth0 JWT Validation Middleware
+// This middleware will check for a valid JWT in the Authorization header
+// and ensure it was issued by your Auth0 domain and for your API audience.
+const checkJwt = auth({
+  audience: process.env.AUTH0_AUDIENCE,
+  issuerBaseURL: process.env.AUTH0_ISSUER_BASE_URL,
+});
+
 // Endpoint for AS ECS task to call back to after blurring is complete
 app.post("/blurred-image-callback", (req, res) => {
     const { originalKey, blurredKey, error } = req.body; // Added error field
@@ -99,8 +122,8 @@ app.post("/blurred-image-callback", (req, res) => {
 });
 
 // Endpoint to get a pre-signed S3 URL for downloading/displaying an image
-app.get("/get-image-url", async (req, res) => {
-
+// This is protected and requires a valid JWT
+app.get("/get-image-url", checkJwt, async (req, res) => {
   const { key } = req.query;
   if (!key) {
       return res.status(400).json({ error: "Image key is required." });
@@ -127,7 +150,8 @@ app.get("/health", (req, res) => {
 
 
 // Endpoint to get a pre-signed S3 URL for image uploads (from frontend)
-app.get("/get-upload-url", async (req, res) => {
+// This is protected and requires a valid JWT
+app.get("/get-upload-url", checkJwt, async (req, res) => {
   const originalFileName = req.query.fileName;
   let fileName; 
   
@@ -156,7 +180,7 @@ app.get("/get-blurred-upload-url", async (req, res) => {
     }
 
     // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
-    let blurredKey = originalKey.replace(/\.nii\.gz$/, '_blurred.nii.gz');
+    let blurredKey = originalKey.replace(/\.nii\.gz$/, '_segmented.nii.gz');
 
     try {
         const uploadUrl = await s3BackendService.generatePresignedUrl(blurredKey, "putObject", 120); // 120 seconds expiry
@@ -195,7 +219,8 @@ app.post("/store-time", async (req, res) => {
 });
 
 // Endpoint for Frontend to invoke blurring (now invokes Lambda)
-app.post("/invoke-blur-process", async (req, res) => { // Renamed from /invoke-blur-lambda
+// This is protected and requires a valid JWT
+app.post("/invoke-blur-process", checkJwt, async (req, res) => {
     const { originalKey } = req.body;
     if (!originalKey) {
         return res.status(400).json({ error: "originalKey is required to invoke blurring." });
@@ -214,14 +239,16 @@ app.post("/invoke-blur-process", async (req, res) => { // Renamed from /invoke-b
         console.log(`✅ Message sent to SQS queue ${SQS_QUEUE_URL} for originalKey: ${originalKey}`);
 
         // 2. Invoke the orchestrator Lambda (to scale up ECS if needed)
-        const payload = { originalKey: originalKey }; // Lambda needs originalKey to decide if it should scale up
-        const invokeResult = await lambda.invoke({
-            FunctionName: ORCHESTRATOR_LAMBDA_NAME,
-            InvocationType: 'Event', // Asynchronous invocation
-            Payload: JSON.stringify(payload),
-        }).promise();
 
-        console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} for ${originalKey}`);
+        //  currently disabled because scale-down alarm anyway scales down AS service
+        // const payload = { originalKey: originalKey }; // Lambda needs originalKey to decide if it should scale up
+        // const invokeResult = await lambda.invoke({
+        //     FunctionName: ORCHESTRATOR_LAMBDA_NAME,
+        //     InvocationType: 'Event', // Asynchronous invocation
+        //     Payload: JSON.stringify(payload),
+        // }).promise();
+
+        // console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} for ${originalKey}`);
         res.json({ status: "success", message: "Blurring process initiated. Check status via frontend updates." });
     } catch (err) {
         console.error(`❌ Error initiating blurring process:`, err);
@@ -238,4 +265,7 @@ server.listen(PORT, () => {
   console.log(`Expecting ORCHESTRATOR_LAMBDA_NAME: ${process.env.ORCHESTRATOR_LAMBDA_NAME || 'NOT SET'}`);
   console.log(`Expecting SQS_QUEUE_URL: ${process.env.SQS_QUEUE_URL || 'NOT SET'}`);
   console.log(`Expecting BACKEND_ALB_DNS: ${process.env.BACKEND_ALB_DNS || 'NOT SET'}`);
+  console.log(`Expecting AUTH0_AUDIENCE: ${process.env.AUTH0_AUDIENCE || 'NOT SET'}`);
+  console.log(`Expecting AUTH0_ISSUER_BASE_URL: ${process.env.AUTH0_ISSUER_BASE_URL || 'NOT SET'}`);
+
 });
