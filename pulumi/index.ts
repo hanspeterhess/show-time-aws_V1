@@ -515,7 +515,8 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
         asProcessingQueue.url,
         backendApiDomainName,
         aiModelsBucket.bucket,
-    ]).apply(([imageName, logGroupName, sqsQueueUrl, apiDomainName, aiModelsBucketName]) =>
+        bucket.bucket,
+    ]).apply(([imageName, logGroupName, sqsQueueUrl, apiDomainName, aiModelsBucketName, uploadBuckettName]) =>
         JSON.stringify([
             {
                 name: "analysis-server",
@@ -535,6 +536,7 @@ const asTaskDefinition = new aws.ecs.TaskDefinition("ecs-as-task", {
                     { name: "BACKEND_SERVER_URL", value: `https://${apiDomainName}` },
                     { name: "AWS_REGION", value: region },
                     { name: "AI_MODELS_BUCKET_NAME", value: aiModelsBucketName },
+                    { name: "DATA_BUCKET_NAME", value: uploadBuckettName },
                 ],
                 resourceRequirements: [{
                     type: "GPU",
@@ -681,7 +683,7 @@ const asQueueDepthAlarm = new aws.cloudwatch.MetricAlarm("as-queue-depth-alarm",
 const asQueueEmptyAlarm = new aws.cloudwatch.MetricAlarm("as-queue-empty-alarm", {
     comparisonOperator: "LessThanOrEqualToThreshold",
     evaluationPeriods: 10, // Evaluate over 5 minutes
-    metricName: "NumberOfMessagesSent",
+    metricName: "ApproximateNumberOfMessagesVisible", // or NumberOfMessagesSent
     namespace: "AWS/SQS",
     period: 60,
     statistic: "Maximum",

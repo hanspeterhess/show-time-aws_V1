@@ -11,10 +11,11 @@ import json
 import time 
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 import torch
+from PIL import Image
 
 import nibabel as nib
-from scipy.ndimage import gaussian_filter
 from os.path import join
+from io import BytesIO
 
 import boto3
 
@@ -33,6 +34,7 @@ BACKEND_CALLBACK_URL = os.getenv("BACKEND_CALLBACK_URL")
 BACKEND_SERVER_URL = os.getenv("BACKEND_SERVER_URL")
 AWS_REGION = os.getenv("AWS_REGION")
 AI_MODELS_BUCKET_NAME = os.getenv("AI_MODELS_BUCKET_NAME")
+DATA_BUCKET_NAME = os.getenv("DATA_BUCKET_NAME")
 
 if not SQS_QUEUE_URL:
     logger.error("❌ ERROR: SQS_QUEUE_URL environment variable is not set. Exiting.")
@@ -48,14 +50,13 @@ if not AWS_REGION:
 if not AI_MODELS_BUCKET_NAME:
     logger.error("❌ ERROR: AI_MODELS_BUCKET_NAME environment variable is not set. Exiting.")
     exit(1)
+if not DATA_BUCKET_NAME:
+    logger.error("❌ ERROR: DATA_BUCKET_NAME environment variable is not set. Exiting.")
+    exit(1)
 
 
 # Initialize SQS clients globally
 sqs_client = boto3.client('sqs', region_name=AWS_REGION)
-
-
-
-
 
 
 def nnUNetv2_predict(image_dir: str, image_name: str, model_base_s3_folder: str, model_type: str='segmentation', use_folds = [0]) -> str:
@@ -94,7 +95,7 @@ def nnUNetv2_predict(image_dir: str, image_name: str, model_base_s3_folder: str,
             os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
             
             # This call will use the s3_client initialized within S3ASService
-            s3_as_service.download_file_from_s3(s3_model_file_key, local_file_path)
+            s3_as_service.download_aimodel_from_s3(s3_model_file_key, local_file_path)
 
         model_path_for_nnunet = local_model_folder_path # This is the path nnUNetPredictor expects
         logger.info(f"nnUNet model downloaded and ready at: {model_path_for_nnunet}")
@@ -143,45 +144,70 @@ class S3ASService:
 
     def __init__(self, backend_url, region_name):
         self.backend_url = backend_url
-        self.s3_client = boto3.client('s3', region_name=region_name) # Initialize s3_client here!
+        self.s3_client = boto3.client('s3', region_name=region_name)
         logger.info(f"S3ASService initialized with backend URL: {backend_url} and S3 region: {region_name}")
 
-    def _request_presigned_url(self, endpoint, key_param_name, key_value):
-        """Helper to request a presigned URL from the backend."""
-        url_endpoint = f"{self.backend_url}/{endpoint}?{key_param_name}={key_value}"
-        logger.info(f"Requesting presigned URL from: {url_endpoint}")
-        response = requests.get(url_endpoint)
-        response.raise_for_status()
-        return response.json()
+    # def _request_presigned_url(self, endpoint, key_param_name, key_value):
+    #     """Helper to request a presigned URL from the backend."""
+    #     url_endpoint = f"{self.backend_url}/{endpoint}?{key_param_name}={key_value}"
+    #     logger.info(f"Requesting presigned URL from: {url_endpoint}")
+    #     response = requests.get(url_endpoint)
+    #     response.raise_for_status()
+    #     return response.json()
 
-    def download_from_s3(self, original_key):
-        """Downloads a file from S3 using a presigned GET URL obtained from backend."""
-        presigned_data = self._request_presigned_url("get-image-url", "key", original_key)
-        image_download_url = presigned_data["url"]
-        logger.info("✅ Received presigned GET URL. Downloading image...")
+    def download_file_from_s3(self, original_key):
+        # """Downloads a file from S3 using a presigned GET URL obtained from backend."""
+        # presigned_data = self._request_presigned_url("get-image-url", "key", original_key)
+        # image_download_url = presigned_data["url"]
+        # logger.info("✅ Received presigned GET URL. Downloading image...")
 
-        image_response = requests.get(image_download_url)
-        image_response.raise_for_status()
-        logger.info("✅ Image downloaded from S3.")
-        return image_response.content
+        # image_response = requests.get(image_download_url)
+        # image_response.raise_for_status()
+        # logger.info("✅ Image downloaded from S3.")
+        # return image_response.content
+        print(f"Downloading file from S3 directly using boto3: {original_key}")
+        image_object = self.s3_client.get_object(Bucket=DATA_BUCKET_NAME, Key=original_key)
+        image_content = image_object['Body'].read()
+        return image_content
 
-    def upload_to_s3(self, original_key, blurred_nifti_bytes):
-        """Uploads blurred NIfTI data to S3 using a presigned PUT URL obtained from backend."""
-        presigned_upload_data = self._request_presigned_url("get-blurred-upload-url", "originalKey", original_key)
-        blurred_s3_upload_url = presigned_upload_data["uploadUrl"]
-        blurred_key_for_s3 = presigned_upload_data["blurredKey"]
+    def upload_file_to_s3(self, original_key, blurred_nifti_bytes):
+        # """Uploads blurred NIfTI data to S3 using a presigned PUT URL obtained from backend."""
+        # presigned_upload_data = self._request_presigned_url("get-blurred-upload-url", "originalKey", original_key)
+        # blurred_s3_upload_url = presigned_upload_data["uploadUrl"]
+        # blurred_key_for_s3 = presigned_upload_data["blurredKey"]
 
-        logger.info(f"✅ Received presigned PUT URL for blurred image: {blurred_key_for_s3}")
-        logger.info(f"Uploading blurred NIfTI (approx {len(blurred_nifti_bytes)/1024/1024:.2f} MB) directly to S3...")
+        # logger.info(f"✅ Received presigned PUT URL for blurred image: {blurred_key_for_s3}")
+        # logger.info(f"Uploading blurred NIfTI (approx {len(blurred_nifti_bytes)/1024/1024:.2f} MB) directly to S3...")
 
-        s3_upload_response = requests.put(blurred_s3_upload_url, data=blurred_nifti_bytes, headers={
-            'Content-Type': 'application/octet-stream'
-        })
-        s3_upload_response.raise_for_status()
-        logger.info(f"✅ Blurred NIfTI image successfully uploaded to S3: {blurred_key_for_s3}")
-        return blurred_key_for_s3 # Return the key used for S3
+        # s3_upload_response = requests.put(blurred_s3_upload_url, data=blurred_nifti_bytes, headers={
+        #     'Content-Type': 'application/octet-stream'
+        # })
+        # s3_upload_response.raise_for_status()
+        # logger.info(f"✅ Blurred NIfTI image successfully uploaded to S3: {blurred_key_for_s3}")
+        # return blurred_key_for_s3 
 
-    def download_file_from_s3(self, s3_key: str, local_path: str):
+        # processed_key = original_key.replace('.nii.gz', '_segmented.nii.gz')
+
+        # print(f"Uploading image to S3 directly using boto3: {processedKey}")
+        # with BytesIO() as nifti_stream:
+        #     nib.save(blurred_nifti_bytes, nifti_stream)
+        #     nifti_stream.seek(0)
+        #     self.s3_client.upload_fileobj(nifti_stream, DATA_BUCKET_NAME, processedKey)
+
+        # buffered_image = BytesIO()
+        # blurred_nifti_bytes.save(buffered_image, format="JPEG")
+        # buffered_image.seek(0)
+
+        # self.s3_client.upload_fileobj(buffered_image, DATA_BUCKET_NAME, original_key)
+
+        processed_key = original_key.replace('.nii.gz', '_segmented.nii.gz')
+        # Use BytesIO to create a file-like object from the byte string
+        with BytesIO(blurred_nifti_bytes) as nifti_stream:
+            self.s3_client.upload_fileobj(nifti_stream, DATA_BUCKET_NAME, processed_key)
+        
+        return processed_key
+
+    def download_aimodel_from_s3(self, s3_key: str, local_path: str):
         """Downloads a specific file from the AI_MODELS_BUCKET_NAME S3 bucket."""
         logger.info(f"Attempting to download file from s3://{AI_MODELS_BUCKET_NAME}/{s3_key} to {local_path}")
         try:
@@ -191,13 +217,7 @@ class S3ASService:
             logger.error(f"❌ Error downloading file {s3_key} from S3 bucket {AI_MODELS_BUCKET_NAME}: {e}", exc_info=True)
             raise # Re-raise to be caught by calling function
 
-# Instantiate the S3ASService instance
-# Ensure BACKEND_SERVER_URL and AWS_REGION are set before this
-if BACKEND_SERVER_URL and AWS_REGION:
-    s3_as_service = S3ASService(BACKEND_SERVER_URL, AWS_REGION)
-else:
-    logger.error("❌ ERROR: BACKEND_SERVER_URL or AWS_REGION environment variable is not set. S3ASService cannot be initialized.")
-    exit(1)
+s3_as_service = S3ASService(BACKEND_SERVER_URL, AWS_REGION)
 
 def process_nifti_file(original_key):
     """
@@ -206,7 +226,7 @@ def process_nifti_file(original_key):
     """
     try:
          # 1. Download original NIfTI image from S3 using the S3ASService
-        original_nifti_bytes = s3_as_service.download_from_s3(original_key)
+        original_nifti_bytes = s3_as_service.download_file_from_s3(original_key)
         
         logger.info(f"Processing NIfTI file: {original_key}")
 
@@ -233,7 +253,7 @@ def process_nifti_file(original_key):
             logger.info("✅ Segmentation NIfTI data prepared in bytes format.")
 
         # 2. Upload blurred NIfTI data directly to S3 using boto3
-        blurred_key_for_s3 = s3_as_service.upload_to_s3(original_key, segmentation_nifti_bytes)
+        blurred_key_for_s3 = s3_as_service.upload_file_to_s3(original_key, segmentation_nifti_bytes)
 
         return blurred_key_for_s3
 

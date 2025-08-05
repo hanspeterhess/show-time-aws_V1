@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 4000;
 
 const ORCHESTRATOR_LAMBDA_NAME = process.env.ORCHESTRATOR_LAMBDA_NAME;
 const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
-const BACKEND_ALB_DNS = process.env.BACKEND_ALB_DNS; // For callback URL construction
+// const BACKEND_ALB_DNS = process.env.BACKEND_ALB_DNS;
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
 // const lambda = new AWS.Lambda();
@@ -106,7 +106,7 @@ const checkJwt = auth({
 
 // Endpoint for AS ECS task to call back to after blurring is complete
 app.post("/blurred-image-callback", (req, res) => {
-    const { originalKey, blurredKey, error } = req.body; // Added error field
+    const { originalKey, blurredKey, error } = req.body;
     if (error) {
         console.error(`❌ Backend: Lambda callback reported error for ${originalKey}: ${error}`);
         io.emit("processing-error", { originalKey, message: `Processing failed: ${error}` });
@@ -171,24 +171,24 @@ app.get("/get-upload-url", checkJwt, async (req, res) => {
   }
 });
 
-// get a pre-signed S3 URL for blurred image uploads (from AS)
-app.get("/get-blurred-upload-url", async (req, res) => {
-    const { originalKey } = req.query;
+// // get a pre-signed S3 URL for blurred image uploads (from AS)
+// app.get("/get-blurred-upload-url", async (req, res) => {
+//     const { originalKey } = req.query;
 
-    if (!originalKey) {
-        return res.status(400).json({ error: "originalKey is required." });
-    }
+//     if (!originalKey) {
+//         return res.status(400).json({ error: "originalKey is required." });
+//     }
 
-    // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
-    let blurredKey = originalKey.replace(/\.nii\.gz$/, '_segmented.nii.gz');
+//     // Determine the blurred key based on the originalKey's extension, ensuring it's .nii.gz
+//     let blurredKey = originalKey.replace(/\.nii\.gz$/, '_segmented.nii.gz');
 
-    try {
-        const uploadUrl = await s3BackendService.generatePresignedUrl(blurredKey, "putObject", 120); // 120 seconds expiry
-        res.json({ uploadUrl: uploadUrl, blurredKey: blurredKey });
-    } catch (err) {
-        res.status(500).json({ error: "Failed to create signed URL for blurred image." });
-    }
-});
+//     try {
+//         const uploadUrl = await s3BackendService.generatePresignedUrl(blurredKey, "putObject", 120); // 120 seconds expiry
+//         res.json({ uploadUrl: uploadUrl, blurredKey: blurredKey });
+//     } catch (err) {
+//         res.status(500).json({ error: "Failed to create signed URL for blurred image." });
+//     }
+// });
 
 // Endpoint to store a timestamp in DynamoDB
 app.post("/store-time", async (req, res) => {
