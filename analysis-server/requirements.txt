@@ -6,3 +6,4 @@ websocket-client
 scipy
 nibabel
 boto3
+nnunetv2
