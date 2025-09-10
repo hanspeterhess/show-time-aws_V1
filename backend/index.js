@@ -22,7 +22,7 @@ const tableName = process.env.TABLE_NAME;
 const bucketName = process.env.BUCKET_NAME;
 const PORT = process.env.PORT || 4000;
 
-const ORCHESTRATOR_LAMBDA_NAME = process.env.ORCHESTRATOR_LAMBDA_NAME;
+// const ORCHESTRATOR_LAMBDA_NAME = process.env.ORCHESTRATOR_LAMBDA_NAME;
 const SQS_QUEUE_URL = process.env.SQS_QUEUE_URL;
 
 const dynamoDb = new AWS.DynamoDB.DocumentClient();
@@ -193,8 +193,12 @@ app.post("/invoke-blur-process", checkJwt, async (req, res) => {
         return res.status(400).json({ error: "originalKey is required to invoke blurring." });
     }
 
-    if (!ORCHESTRATOR_LAMBDA_NAME || !SQS_QUEUE_URL) {
-        console.error("Orchestrator Lambda or SQS Queue not configured. Cannot initiate blurring.");
+    // if (!ORCHESTRATOR_LAMBDA_NAME || !SQS_QUEUE_URL) {
+    //     console.error("Orchestrator Lambda or SQS Queue not configured. Cannot initiate blurring.");
+    //     return res.status(500).json({ error: "Blurring service not configured." });
+    // }    
+    if (!SQS_QUEUE_URL) {
+        console.error("SQS Queue not configured. Cannot initiate blurring.");
         return res.status(500).json({ error: "Blurring service not configured." });
     }
 
@@ -226,24 +230,24 @@ app.post("/invoke-blur-process", checkJwt, async (req, res) => {
 app.post("/user-logged-in", checkJwt, async (req, res) => {
     console.log("✅ Backend received login notification from an authenticated user.");
     
-    try {
-        // The payload for this Lambda can be empty or contain user-specific data if needed
-        const payload = {}; 
+    // try {
+    //     // The payload for this Lambda can be empty or contain user-specific data if needed
+    //     const payload = {}; 
         
-        const invokeParams = {
-            FunctionName: ORCHESTRATOR_LAMBDA_NAME,
-            InvocationType: 'Event', // Asynchronous invocation
-            Payload: JSON.stringify(payload),
-        };
+    //     // const invokeParams = {
+    //     //     FunctionName: ORCHESTRATOR_LAMBDA_NAME,
+    //     //     InvocationType: 'Event', // Asynchronous invocation
+    //     //     Payload: JSON.stringify(payload),
+    //     // };
 
-        await lambda.invoke(invokeParams).promise();
+    //     // await lambda.invoke(invokeParams).promise();
 
-        console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} after user login.`);
-        res.json({ status: "success", message: "Orchestrator Lambda invoked." });
-    } catch (err) {
-        console.error(`❌ Error invoking orchestrator Lambda:`, err);
-        res.status(500).json({ error: "Failed to invoke orchestrator Lambda." });
-    }
+    //     // console.log(`✅ Successfully invoked orchestrator Lambda ${ORCHESTRATOR_LAMBDA_NAME} after user login.`);
+    //     res.json({ status: "success", message: "Orchestrator Lambda invoked." });
+    // } catch (err) {
+    //     console.error(`❌ Error invoking orchestrator Lambda:`, err);
+    //     res.status(500).json({ error: "Failed to invoke orchestrator Lambda." });
+    // }
 });
 
 // Start the server
@@ -252,7 +256,7 @@ server.listen(PORT, () => {
   console.log(`Expecting AWS_REGION: ${process.env.AWS_REGION}`);
   console.log(`Expecting TABLE_NAME: ${process.env.TABLE_NAME}`);
   console.log(`Expecting BUCKET_NAME: ${process.env.BUCKET_NAME}`);
-  console.log(`Expecting ORCHESTRATOR_LAMBDA_NAME: ${process.env.ORCHESTRATOR_LAMBDA_NAME || 'NOT SET'}`);
+  // console.log(`Expecting ORCHESTRATOR_LAMBDA_NAME: ${process.env.ORCHESTRATOR_LAMBDA_NAME || 'NOT SET'}`);
   console.log(`Expecting SQS_QUEUE_URL: ${process.env.SQS_QUEUE_URL || 'NOT SET'}`);
   console.log(`Expecting BACKEND_ALB_DNS: ${process.env.BACKEND_ALB_DNS || 'NOT SET'}`);
   console.log(`Expecting AUTH0_AUDIENCE: ${process.env.AUTH0_AUDIENCE || 'NOT SET'}`);
